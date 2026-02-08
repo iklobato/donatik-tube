@@ -4,13 +4,10 @@
 services:
   nginx-rtmp:
     image: tiangolo/nginx-rtmp
-    build:
-      context: .
-      dockerfile: Dockerfile.nginx
     ports:
       - "1935:1935"
     volumes:
-      - ./nginx:/etc/nginx/nginx.conf:ro
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
     restart: unless-stopped
 
   worker:
@@ -18,14 +15,15 @@ services:
       context: ..
       dockerfile: docker/Dockerfile.worker
     env_file: .env
-    environment:
-      - DB_HOST=cloud-sql-auth
-      - DB_PORT=5432
     depends_on:
       - nginx-rtmp
+    volumes:
+      - ./test_media:/test_media:ro
     restart: unless-stopped
 
   cloud-sql-auth:
+    profiles:
+      - db
     image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:latest
     command: ["/cloud-sql-proxy", "--port=5432", "${CLOUD_SQL_CONNECTION_NAME}"]
     env_file: .env
