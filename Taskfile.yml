@@ -5,6 +5,11 @@ vars:
   UV: uv
   TF_DIR: terraform
   TF_ENV: terraform/environments/prod
+  # gcloud: override via env or -v (e.g. task gcloud:ssh -v GCP_ZONE:us-east1-b)
+  GCP_PROJECT: donatik-486803
+  GCP_VM: streaming-worker-vm
+  GCP_ZONE: us-central1-a
+  GCP_PROXY_PORT: "5432"
 
 tasks:
   default:
@@ -83,6 +88,93 @@ tasks:
         else
           terraform plan -var-file=terraform.tfvars.example
         fi
+
+  tf:output:
+    desc: Show Terraform outputs for prod (cloud_sql_connection_name, compute_network_ip).
+    dir: "{{.TF_ENV}}"
+    cmds:
+      - terraform output
+
+  # --- gcloud ---
+  gcloud:auth-login:
+    desc: Authenticate with gcloud (opens browser; use for gcloud CLI and compute ssh/scp).
+    cmds:
+      - gcloud auth login
+
+  gcloud:auth-adc:
+    desc: Set Application Default Credentials (opens browser). Pass GCP_PROJECT to use a specific project (e.g. -v GCP_PROJECT:my-project).
+    cmds:
+      - |
+        if [ -n "{{.GCP_PROJECT}}" ]; then
+          echo "Setting project to {{.GCP_PROJECT}} before ADC login..."
+          gcloud config set project "{{.GCP_PROJECT}}"
+        fi
+        gcloud auth application-default login
+
+  gcloud:auth-list:
+    desc: List gcloud accounts and show which is active.
+    cmds:
+      - gcloud auth list
+
+  gcloud:project-set:
+    desc: Set default gcloud project (pass GCP_PROJECT, e.g. task gcloud:project-set -v GCP_PROJECT:my-project).
+    cmds:
+      - |
+        if [ -z "{{.GCP_PROJECT}}" ]; then
+          echo "Usage: task gcloud:project-set -v GCP_PROJECT:your-project-id"
+          echo "Or:   GCP_PROJECT=your-project-id task gcloud:project-set"
+          exit 1
+        fi
+        gcloud config set project "{{.GCP_PROJECT}}"
+        echo "Project set to {{.GCP_PROJECT}}"
+
+  gcloud:config:
+    desc: Show current gcloud project and account (set project with gcloud config set project ID).
+    cmds:
+      - gcloud config get-value project 2>/dev/null || true
+      - gcloud config get-value account 2>/dev/null || true
+
+  gcloud:apis-enable:
+    desc: Enable GCP APIs required for this project (compute, sqladmin, iam, youtube).
+    cmds:
+      - gcloud services enable compute.googleapis.com
+      - gcloud services enable sqladmin.googleapis.com
+      - gcloud services enable iam.googleapis.com
+      - gcloud services enable youtube.googleapis.com
+
+  gcloud:ssh:
+    desc: SSH into the streaming VM (uses GCP_VM, GCP_ZONE; project from gcloud config).
+    cmds:
+      - gcloud compute ssh "{{.GCP_VM}}" --zone "{{.GCP_ZONE}}"
+
+  gcloud:scp-docker:
+    desc: Copy docker/ directory to VM home/donate-docker (for deploy; set GCP_VM, GCP_ZONE).
+    cmds:
+      - gcloud compute scp --recurse docker "{{.GCP_VM}}:donate-docker" --zone "{{.GCP_ZONE}}"
+
+  gcloud:proxy:
+    desc: Run Cloud SQL Auth Proxy locally (connection name from tf output; needs cloud-sql-proxy binary).
+    cmds:
+      - |
+        CONN="$(cd {{.TF_ENV}} && terraform output -raw cloud_sql_connection_name 2>/dev/null)" || true
+        if [ -z "$CONN" ]; then
+          echo "Run terraform apply first and ensure cloud_sql_connection_name output exists."
+          exit 1
+        fi
+        echo "Starting proxy for $CONN on port {{.GCP_PROXY_PORT}}"
+        exec cloud-sql-proxy --port "{{.GCP_PROXY_PORT}}" "$CONN"
+
+  gcloud:proxy-docker:
+    desc: Run Cloud SQL Auth Proxy via Docker (connection name from tf output; no binary needed).
+    cmds:
+      - |
+        CONN="$(cd {{.TF_ENV}} && terraform output -raw cloud_sql_connection_name 2>/dev/null)" || true
+        if [ -z "$CONN" ]; then
+          echo "Run terraform apply first and ensure cloud_sql_connection_name output exists."
+          exit 1
+        fi
+        echo "Starting proxy for $CONN on port {{.GCP_PROXY_PORT}}"
+        docker run --rm -p "{{.GCP_PROXY_PORT}}:5432" gcr.io/cloud-sql-connectors/cloud-sql-proxy:latest "$CONN"
 
   # --- check ---
   check:
