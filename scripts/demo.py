@@ -108,9 +108,7 @@ def run_pipeline(
     enc: av.CodecContext | None = None
     try:
         while not shutdown_flag[0]:
-            enc, rtmp_proc, should_exit = _process_file(
-                file_path, enc_cfg, enc, rtmp_proc, shutdown_flag
-            )
+            enc, rtmp_proc, should_exit = _process_file(file_path, enc_cfg, enc, rtmp_proc, shutdown_flag)
             if should_exit or not loop or shutdown_flag[0]:
                 break
     finally:
@@ -119,9 +117,7 @@ def run_pipeline(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(
-        description="Stream a video file to YouTube Live with payment link overlay (prototype)."
-    )
+    parser = argparse.ArgumentParser(description="Stream a video file to YouTube Live with payment link overlay (prototype).")
     parser.add_argument("video_file", help="Path to video file (e.g. .mp4)")
     parser.add_argument("--payment-url", required=True, help="Payment/donation URL to show on overlay")
     parser.add_argument("--payment-label", default="Donate", help="Label for the payment link (default: Donate)")
