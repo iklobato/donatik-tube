@@ -47,11 +47,22 @@ class ApiSettings(BaseModel):
 
 
 class WorkerSettings(BaseModel):
-    """Stream worker: overlay refresh interval, default input URL, and source retry interval."""
+    """Stream worker: overlay refresh interval, default input URL, source retry, and optional RTMP output."""
 
     overlay_refresh_interval_seconds: int = 8
     default_input_url: str = "rtsp://localhost:554/stream"
     source_retry_interval_seconds: float = 5.0
+    rtmp_output_url: str = ""
+
+
+class YouTubeSettings(BaseModel):
+    """YouTube Live: OAuth client and per-channel refresh tokens (JSON). Push config path for overlay API."""
+
+    client_id: str = ""
+    client_secret: str = ""
+    refresh_tokens: str = ""  # JSON: {"UCxxx":"refresh_token1",...}
+    push_conf_path: str = "/etc/nginx/conf.d/youtube_push.conf"
+    refresh_interval_seconds: int = 300
 
 
 class StripeSettings(BaseModel):
@@ -75,6 +86,7 @@ class Settings(BaseSettings):
     encoding: EncodingSettings = Field(default_factory=EncodingSettings)
     api: ApiSettings = Field(default_factory=ApiSettings)
     worker: WorkerSettings = Field(default_factory=WorkerSettings)
+    youtube: YouTubeSettings = Field(default_factory=YouTubeSettings)
     stripe: StripeSettings = Field(default_factory=StripeSettings)
 
 
