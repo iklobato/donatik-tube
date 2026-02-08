@@ -49,6 +49,8 @@ tasks:
   # --- app ---
   app:api:
     desc: Run the overlay API locally (needs DB__* or .env; deploy with gcloud).
+    env:
+      API__PORT: "5099"
     cmds:
       - "{{.UV}} run overlay-api"
 
@@ -75,7 +77,12 @@ tasks:
     dir: "{{.TF_ENV}}"
     cmds:
       - terraform init -input=false
-      - terraform plan -var-file=terraform.tfvars
+      - |
+        if [ -f terraform.tfvars ]; then
+          terraform plan -var-file=terraform.tfvars
+        else
+          terraform plan -var-file=terraform.tfvars.example
+        fi
 
   # --- check ---
   check:
