@@ -1,0 +1,58 @@
+# Git and CI
+.git/
+.gitignore
+.github/
+
+# Docs and specs (not needed in image)
+*.md
+specs/
+.cursor/
+.vscode/
+.idea/
+
+# Python dev and test
+.venv/
+venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+tests/
+
+# Build and packaging
+.eggs/
+*.egg-info/
+*.egg
+dist/
+build/
+.uv/
+
+# Terraform (not used inside container)
+.terraform/
+.terraformignore
+*.tf
+*.tfstate*
+*.tfvars
+*.tfvars.example
+
+# Local env and secrets (inject at runtime)
+.env
+.env.*
+!.env.example
+
+# Logs and local DB
+*.log
+*.db
+*.sqlite
+*.sqlite3
+overlay.db
+
+# Docker build context
+Dockerfile*
+.docker/
+docker-compose*.yml
+.dockerignore

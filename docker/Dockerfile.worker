@@ -1,0 +1,16 @@
+# Stream worker: Python 3.11, PyAV, Pillow, SQLAlchemy
+FROM python:3.11-slim
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libavformat-dev libavcodec-dev libavutil-dev libswscale-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY pyproject.toml ./
+RUN pip install --no-cache-dir -e .
+
+COPY src/ ./src/
+WORKDIR /app/src
+ENV PYTHONPATH=/app/src
+ENTRYPOINT ["python", "main.py"]

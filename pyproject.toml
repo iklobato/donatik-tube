@@ -1,0 +1,75 @@
+[project]
+name = "donate-streaming"
+version = "0.1.0"
+description = "24/7 multicanal streaming infrastructure (GCP) - stream workers and overlay API"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "av>=12.0.0",
+    "Flask>=3.0.0",
+    "Pillow>=10.0.0",
+    "pydantic>=2.0.0",
+    "pydantic-settings>=2.0.0",
+    "SQLAlchemy>=2.0.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/config", "src/overlay_api", "src/stream_workers"]
+
+[project.scripts]
+overlay-api = "overlay_api.app:run"
+
+[dependency-groups]
+dev = [
+    "pytest>=7.0.0",
+    "black>=24.0.0",
+    "ruff>=0.8.0",
+    "mypy>=1.13.0",
+]
+
+[tool.black]
+line-length = 88
+target-version = ["py311"]
+include = '\.pyi?$'
+extend-exclude = '\.git|\.terraform|__pycache__'
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+src = ["src", "scripts"]
+exclude = [".git", ".terraform", "__pycache__"]
+
+[tool.ruff.lint]
+select = [
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+    "F",      # Pyflakes
+    "I",      # isort
+    "B",      # flake8-bugbear
+    "C4",     # flake8-comprehensions
+    "UP",     # pyupgrade
+]
+ignore = [
+    "E501",   # line too long (handled by black)
+    "B008",   # do not perform function calls in argument defaults
+    "B904",   # raise without from inside except
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["config", "overlay_api", "stream_workers"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_ignores = true
+show_error_codes = true
+
+[[tool.mypy.overrides]]
+module = "av"
+ignore_missing_imports = true
+follow_imports = "skip"
