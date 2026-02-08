@@ -1,5 +1,11 @@
-# Copy to terraform.tfvars and set your GCP project ID.
+# Copy to terraform.tfvars and set your values.
+# From terraform/environments/prod: terraform init && terraform plan -var-file=terraform.tfvars && terraform apply -var-file=terraform.tfvars
 
+# Required: your GCP project ID (e.g. my-streaming-project)
 project_id = "your-gcp-project-id"
-region     = "us-central1"
-zone       = "us-central1-a"
+
+# Optional: region and zone (defaults shown)
+# List regions: gcloud compute regions list
+# List zones:   gcloud compute zones list --filter="region:us-central1"
+region = "us-central1"
+zone   = "us-central1-a"
