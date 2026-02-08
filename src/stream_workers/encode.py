@@ -4,6 +4,7 @@ Uses config.settings encoding. On capacity exceeded: drop frames and log (FR-009
 """
 
 import logging
+from fractions import Fraction
 
 import av
 
@@ -25,7 +26,8 @@ def create_video_encoder(
     codec = av.CodecContext.create(enc.encoder, "w")
     codec.width = w
     codec.height = h
-    codec.time_base = (1, f)
+    codec.pix_fmt = "yuv420p"
+    codec.time_base = Fraction(1, f)
     codec.bit_rate = enc.cbr_bitrate_k * 1000
     codec.gop_size = enc.gop_frames
     codec.options = {
