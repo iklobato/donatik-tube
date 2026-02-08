@@ -8,6 +8,21 @@ services:
       - "1935:1935"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+    restart: unless-stopped
+
+  overlay-api:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.worker
+    env_file: .env
+    entrypoint: ["python", "-m", "overlay_api.app"]
+    ports:
+      - "5001:5001"
+    volumes:
+      - ./nginx/conf.d:/etc/nginx/conf.d
+    depends_on:
+      - nginx-rtmp
     restart: unless-stopped
 
   worker:
