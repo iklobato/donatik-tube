@@ -33,7 +33,7 @@ overlay.db
 *.tfstate.*
 *.tfvars
 !*.tfvars.example
-.terraform.lock.hcl
+# .terraform.lock.hcl is committed for reproducible provider versions
 crash.log
 override.tf
 override.tf.json

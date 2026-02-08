@@ -368,14 +368,14 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "av", specifier = ">=12.0.0" },
-    { name = "flask", specifier = ">=3.0.0" },
-    { name = "google-api-python-client", specifier = ">=2.0.0" },
-    { name = "pillow", specifier = ">=10.0.0" },
-    { name = "pydantic", specifier = ">=2.0.0" },
-    { name = "pydantic-settings", specifier = ">=2.0.0" },
-    { name = "sqlalchemy", specifier = ">=2.0.0" },
-    { name = "stripe", specifier = ">=8.0.0" },
+    { name = "av", specifier = "==16.1.0" },
+    { name = "flask", specifier = "==3.1.2" },
+    { name = "google-api-python-client", specifier = "==2.189.0" },
+    { name = "pillow", specifier = "==12.1.0" },
+    { name = "pydantic", specifier = "==2.12.5" },
+    { name = "pydantic-settings", specifier = "==2.12.0" },
+    { name = "sqlalchemy", specifier = "==2.0.46" },
+    { name = "stripe", specifier = "==14.3.0" },
 ]
 
 [package.metadata.requires-dev]

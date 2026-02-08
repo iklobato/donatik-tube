@@ -1,4 +1,5 @@
 # Stream worker: Python 3.11, PyAV, Pillow, SQLAlchemy
+# Installs from pyproject.toml + uv.lock only (single source of truth).
 FROM python:3.11-slim
 
 WORKDIR /app
@@ -8,10 +9,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libavformat-dev libavcodec-dev libavutil-dev libswscale-dev \
     && rm -rf /var/lib/apt/lists/*
 
-COPY pyproject.toml README.md ./
+# Install uv and sync from lockfile (deterministic install)
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+COPY pyproject.toml uv.lock README.md ./
 COPY src/ ./src/
-RUN pip install --no-cache-dir -e .
+RUN uv sync --frozen --no-dev
 
 WORKDIR /app/src
 ENV PYTHONPATH=/app/src
-ENTRYPOINT ["python", "main.py"]
+ENTRYPOINT ["/app/.venv/bin/python", "main.py"]

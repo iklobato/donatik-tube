@@ -1,0 +1,86 @@
+# Taskfile for donate-streaming. Deploy with gcloud; this file is for local/dev.
+version: "3"
+
+vars:
+  UV: uv
+  TF_DIR: terraform
+  TF_ENV: terraform/environments/prod
+
+tasks:
+  default:
+    desc: List available tasks (run "task --list" or "task <category>:<name>").
+    cmds:
+      - task --list
+
+  # --- deps ---
+  deps:install:
+    desc: Install Python dependencies from uv.lock (single source of truth; run after clone or when lockfile changes).
+    cmds:
+      - "{{.UV}} sync"
+
+  deps:lock:
+    desc: Regenerate uv.lock from pyproject.toml (e.g. after adding or bumping a dependency).
+    cmds:
+      - "{{.UV}} lock"
+
+  # --- code ---
+  code:lint:
+    desc: Run ruff and black in check-only mode on src/ and scripts/ (fails if style or lint issues).
+    cmds:
+      - "{{.UV}} run ruff check src scripts"
+      - "{{.UV}} run black --check src scripts"
+
+  code:fmt:
+    desc: Format Python code with black (writes changes to src/ and scripts/).
+    cmds:
+      - "{{.UV}} run black src scripts"
+
+  code:typecheck:
+    desc: Run mypy on src/ for static type checking.
+    cmds:
+      - "{{.UV}} run mypy src"
+
+  # --- test ---
+  test:run:
+    desc: Run pytest test suite.
+    cmds:
+      - "{{.UV}} run pytest"
+
+  # --- app ---
+  app:api:
+    desc: Run the overlay API locally (needs DB__* or .env; deploy with gcloud).
+    cmds:
+      - "{{.UV}} run overlay-api"
+
+  app:init-db:
+    desc: Create database schema (run once; set DB__* or use .env; uses scripts/init_db.py).
+    cmds:
+      - "{{.UV}} run python scripts/init_db.py"
+
+  # --- terraform ---
+  tf:init:
+    desc: Initialize Terraform in terraform/ and fetch providers (uses .terraform.lock.hcl).
+    dir: "{{.TF_DIR}}"
+    cmds:
+      - terraform init -input=false
+
+  tf:validate:
+    desc: Validate Terraform configuration in terraform/ (syntax and consistency).
+    dir: "{{.TF_DIR}}"
+    cmds:
+      - terraform validate
+
+  tf:plan:
+    desc: Run terraform plan in terraform/environments/prod (shows planned changes; apply via your gcloud/deploy flow).
+    dir: "{{.TF_ENV}}"
+    cmds:
+      - terraform init -input=false
+      - terraform plan -var-file=terraform.tfvars
+
+  # --- check ---
+  check:
+    desc: Install deps, then run lint and tests (use before commit or in CI).
+    deps:
+      - deps:install
+      - code:lint
+      - test:run

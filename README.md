@@ -187,7 +187,27 @@ flowchart TB
 - **gcloud CLI** installed and authenticated: `gcloud auth login` and `gcloud config set project YOUR_PROJECT_ID`.
 - **Terraform** ≥ 1.x ([install](https://developer.hashicorp.com/terraform/downloads)).
 - **Docker** and **Docker Compose** (for running Nginx-RTMP, workers, and Cloud SQL Auth Proxy).
-- **Python 3.11+** and **uv** (optional, for local runs and `scripts/init_db.py`).
+- **Python 3.11+** and **uv** (for local runs and `scripts/init_db.py`; application installs use **pyproject.toml** and **uv.lock** only).
+
+### Application dependencies (Python)
+
+Install from the repo root with **uv** (single source of truth: `pyproject.toml` + `uv.lock`):
+
+```bash
+uv sync
+```
+
+For minimal runtime set (no dev tools): `uv sync --no-dev`. If a pinned dependency cannot be obtained (registry down, package yanked, network failure), the install **fails with a clear error**; do not use alternate sources. See [specs/1-minimal-pinned-deps/quickstart.md](specs/1-minimal-pinned-deps/quickstart.md) for full install and verification steps.
+
+### Infrastructure dependencies (Terraform)
+
+Provider versions are pinned in **`terraform/versions.tf`** and locked in **`terraform/.terraform.lock.hcl`** (commit the lockfile for reproducible `terraform init`). From the **`terraform/`** directory:
+
+```bash
+terraform init
+```
+
+If a provider cannot be obtained, `terraform init` **fails with a clear error**; do not use alternate sources. See [specs/1-minimal-pinned-deps/quickstart.md](specs/1-minimal-pinned-deps/quickstart.md) for init and verification steps. When a **vulnerability** is known in a pinned dependency, update the version in `pyproject.toml` or `terraform/versions.tf`, run `uv lock` or `terraform init -upgrade` as appropriate, and commit the updated spec and lockfile; see [Updating after a vulnerability](specs/1-minimal-pinned-deps/quickstart.md#updating-after-a-vulnerability) in the quickstart.
 
 ---
 
