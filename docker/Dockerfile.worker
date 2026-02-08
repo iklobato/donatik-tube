@@ -7,10 +7,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libavformat-dev libavcodec-dev libavutil-dev libswscale-dev \
     && rm -rf /var/lib/apt/lists/*
 
-COPY pyproject.toml ./
+COPY pyproject.toml README.md ./
+COPY src/ ./src/
 RUN pip install --no-cache-dir -e .
 
-COPY src/ ./src/
 WORKDIR /app/src
 ENV PYTHONPATH=/app/src
 ENTRYPOINT ["python", "main.py"]

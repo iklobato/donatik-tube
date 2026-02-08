@@ -5,6 +5,7 @@
 
 # Docs and specs (not needed in image)
 *.md
+!README.md
 specs/
 .cursor/
 .vscode/
