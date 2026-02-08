@@ -1,6 +1,6 @@
 # Donatik Tube – 24/7 streaming on GCP
 
-Live streaming pipeline for **YouTube Live**: Terraform-provisioned GCP infrastructure (Compute Engine, Cloud SQL PostgreSQL), Nginx-RTMP ingest, and Python workers for demux, overlay (Top 10 donor ranking + PIX alerts), PTS/DTS continuity, and H.264 encode.
+Live streaming pipeline for **YouTube Live**: Terraform-provisioned GCP infrastructure (Compute Engine, Cloud SQL PostgreSQL), Nginx-RTMP ingest, and Python workers for demux, overlay (Top 10 donor ranking, PIX alerts, and a **payment/donation link**), PTS/DTS continuity, and H.264 encode. The overlay API exposes **payment link** endpoints (GET/PUT) and an optional **Stripe webhook** for payment-to-donor sync.
 
 This guide explains everything you need to deploy the stack on Google Cloud Platform.
 
@@ -51,10 +51,10 @@ flowchart TB
     end
 
     OBS[OBS / Encoder] -->|RTMP| NGINX
-    BACKEND[Donation backend] -->|POST /donors, /alerts, /ranking| API
+    BACKEND[Donation backend] -->|POST /donors, /alerts, /ranking; GET/PUT /payment-link| API
 ```
 
-Terraform provisions the network, VM, and Cloud SQL. Docker Compose runs Nginx-RTMP (ingest), the stream worker, the overlay API, and optionally the Cloud SQL Auth Proxy. Workers and the API talk to PostgreSQL via the proxy or the instance private IP.
+Terraform provisions the network, VM, and Cloud SQL. Docker Compose runs Nginx-RTMP (ingest), the stream worker, the overlay API, and optionally the Cloud SQL Auth Proxy. Workers and the API talk to PostgreSQL via the proxy or the instance private IP. The overlay API also serves the global payment link (GET/PUT `/payment-link`, optional API key) and Stripe webhook (POST `/stripe-webhook`) for payment-to-donor sync.
 
 ### Stream and data flow
 
@@ -67,7 +67,7 @@ flowchart LR
 
     subgraph Worker["Stream worker"]
         DEMUX[Demux<br/>PyAV]
-        OVERLAY[Overlay<br/>Top 10 + PIX]
+        OVERLAY[Overlay<br/>Top 10 + PIX + payment link]
         PTS[PTS/DTS<br/>continuity]
         ENC[Encode<br/>H.264 CBR]
         DEMUX --> OVERLAY --> PTS --> ENC
@@ -75,7 +75,7 @@ flowchart LR
 
     subgraph Data
         DB[(Cloud SQL)]
-        DB -.->|read ranking & alerts| OVERLAY
+        DB -.->|read ranking, alerts, payment link| OVERLAY
     end
 
     RTMP --> DEMUX
@@ -83,7 +83,7 @@ flowchart LR
     ENC --> OUT[Encoded stream]
 ```
 
-Input can be RTMP (from Nginx-RTMP) or a file/RTSP URL. The worker demuxes, applies overlay data from the DB, rewrites timestamps for continuity, and encodes to H.264. The overlay API (not shown here) writes donors, alerts, and ranking into the same DB.
+Input can be RTMP (from Nginx-RTMP) or a file/RTSP URL. The worker demuxes, applies overlay data (ranking, alerts, and one global payment link) from the DB, rewrites timestamps for continuity, and encodes to H.264. The overlay API writes donors, alerts, ranking, and the payment link into the same DB; it also exposes GET/PUT `/payment-link` and POST `/stripe-webhook` for Stripe payment-to-donor sync.
 
 ### Worker pipeline (detail)
 
@@ -99,7 +99,7 @@ sequenceDiagram
 
     loop Every N seconds
         Overlay->>DB: get_overlay_snapshot()
-        DB-->>Overlay: ranking, alerts
+        DB-->>Overlay: ranking, alerts, payment_link
     end
 
     loop Per stream
@@ -109,7 +109,7 @@ sequenceDiagram
             Demux->>Decode: packets
             Decode->>Decode: decode to frames
             Decode->>Overlay: video frame
-            Overlay->>Overlay: draw ranking + alerts
+            Overlay->>Overlay: draw ranking + alerts + payment link
             Overlay->>PTS: frame
             PTS->>PTS: rewrite pts/dts (monotonic)
             PTS->>Encode: frame
@@ -118,7 +118,7 @@ sequenceDiagram
     end
 ```
 
-The worker opens the input (file or RTSP), demuxes packets, decodes to frames, draws the overlay from the latest DB snapshot, rewrites PTS/DTS for smooth playback, and encodes to H.264. Overlay data is refreshed periodically from the database.
+The worker opens the input (file or RTSP), demuxes packets, decodes to frames, draws the overlay (ranking, alerts, and payment link when configured) from the latest DB snapshot, rewrites PTS/DTS for smooth playback, and encodes to H.264. Overlay data is refreshed periodically from the database.
 
 ### Infrastructure (Terraform)
 
@@ -164,15 +164,16 @@ flowchart TB
     N --> W
     W -->|read| P
     A -->|write| P
+    STRIPE[Stripe] -->|webhook| A
     W -->|optional push| Y
 ```
 
 | Component     | Role |
 |---------------|------|
 | **Nginx-RTMP** | Accepts RTMP ingest on port 1935; can push to YouTube or other RTMP destinations. |
-| **Worker**     | Reads video from RTMP/file/RTSP, applies overlay from DB, keeps PTS/DTS continuous, encodes to H.264. |
-| **Overlay API**| REST API to write donors, ranking, and PIX alerts into the database. |
-| **PostgreSQL** | Stores overlay data; read by workers, written by the overlay API. |
+| **Worker**     | Reads video from RTMP/file/RTSP, applies overlay (ranking, alerts, payment link) from DB, keeps PTS/DTS continuous, encodes to H.264. |
+| **Overlay API**| REST API: writes donors, ranking, PIX alerts; GET/PUT `/payment-link` (optional API key); POST `/stripe-webhook` for payment-to-donor sync. |
+| **PostgreSQL** | Stores overlay data (donors, ranking, alerts, overlay_payment_link); read by workers, written by the overlay API. |
 
 ---
 
@@ -303,6 +304,11 @@ DB__password=YOUR_SECURE_PASSWORD
 # Overlay API (optional; defaults are 0.0.0.0 and 5001)
 API__host=0.0.0.0
 API__port=5001
+# Optional: require Bearer or X-API-Key for GET/PUT /payment-link
+# API__payment_link_api_key=your-secret-key
+
+# Optional: Stripe webhook secret for POST /stripe-webhook (payment-to-donor sync)
+# STRIPE__webhook_secret=whsec_...
 ```
 
 - **`DB__host=cloud-sql-auth`** is the Docker Compose service name of the Cloud SQL Proxy; the worker and overlay API connect to it on port 5432.
@@ -321,13 +327,13 @@ and do **not** start the `cloud-sql-auth` service (or use a separate compose ove
 
 ### Full list of optional env vars
 
-See **`.env.example`** at the repo root for all supported keys (`DB__*`, `API__*`, `ENCODING__*`, `WORKER__*`).
+See **`.env.example`** at the repo root for all supported keys (`DB__*`, `API__*`, `ENCODING__*`, `WORKER__*`, `STRIPE__*`).
 
 ---
 
 ## Initialize the database
 
-Create the schema (tables for donors, ranking, PIX alerts) once before running the app.
+Create the schema (tables for donors, ranking, PIX alerts, overlay_payment_link) once before running the app.
 
 **Option A – Local with Auth Proxy**
 
@@ -392,10 +398,10 @@ To run **on the GCP VM**:
 
 ---
 
-## Overlay data
+## Overlay API and data
 
-- **Read:** Workers read the Top 10 ranking and PIX alerts from the database (atomic snapshot) every few seconds; if the DB is unreachable, they keep the last known overlay.
-- **Write:** The **overlay API** writes donors, alerts, and ranking to the same database. Run it separately (e.g. on the same VM or another host that can reach the DB or the proxy):
+- **Read:** Workers read the Top 10 ranking, PIX alerts, and the global payment link from the database (atomic snapshot) every few seconds; if the DB is unreachable, they keep the last known overlay.
+- **Write:** The **overlay API** writes donors, alerts, ranking, and the payment link to the same database. Run it separately (e.g. on the same VM or another host that can reach the DB or the proxy):
 
   ```bash
   uv run overlay-api
@@ -403,7 +409,12 @@ To run **on the GCP VM**:
 
   Default bind: `0.0.0.0:5001`. Set `API__host` and `API__port` via env if needed.
 
-- **Endpoints:** `POST /donors`, `POST /alerts`, `POST /ranking` (see `src/overlay_api/app.py`). Use these to feed overlay data from your donation/alert backend.
+- **Endpoints:**  
+  - `POST /donors`, `POST /alerts`, `POST /ranking` – feed overlay data from your donation/alert backend (see `src/overlay_api/app.py`).  
+  - **GET/PUT `/payment-link`** – read/update the single global payment link (URL + label) shown on the overlay. When `API__payment_link_api_key` is set, requests must send `Authorization: Bearer <key>` or `X-API-Key: <key>`.  
+  - **POST `/stripe-webhook`** – Stripe webhook for payment-to-donor sync. When `STRIPE__webhook_secret` is set, the API verifies the signature and creates donors on `checkout.session.completed`.
+
+- **Payment link on overlay:** One global payment/donation link (URL + label) is stored in `overlay_payment_link` and drawn on the overlay when set; when empty, no payment link area is shown. For setup (Stripe payment links, webhook, API key), see **`specs/1-stripe-payment-links/quickstart.md`**.
 
 ---
 
@@ -423,7 +434,7 @@ See the [How it works (diagrams)](#how-it-works-diagrams) section for Mermaid di
 | **Terraform**   | VPC, firewall (1935, 554), Cloud SQL (PostgreSQL, private IP), Compute Engine VM, IAM. |
 | **Nginx-RTMP**  | RTMP ingest on 1935, `live` application. |
 | **Worker**      | Demux → overlay (DB) → PTS/DTS → H.264 encode. |
-| **Cloud SQL**   | Stores donors, ranking, PIX alerts; read by workers, written by overlay API. |
+| **Cloud SQL**   | Stores donors, ranking, PIX alerts, overlay_payment_link; read by workers, written by overlay API. |
 | **Auth Proxy**  | Allows secure connection to Cloud SQL from Docker or local (no direct public IP on DB). |
 
 ---

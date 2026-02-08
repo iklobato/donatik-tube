@@ -8,4 +8,4 @@ docker run -p 5432:5432 gcr.io/cloud-sql-connectors/cloud-sql-proxy:latest \
   /cloud-sql-proxy --port=5432 YOUR_CONNECTION_NAME
 ```
 
-Or use the `cloud-sql-auth` service in docker-compose.yml (set CLOUD_SQL_CONNECTION_NAME in .env).
+Or use the `cloud-sql-auth` service in docker-compose.yml (set `CLOUD_SQL_CONNECTION_NAME` in `.env`). The same `docker/.env` is used for the app (DB, overlay API, payment link API key, Stripe webhook, etc.).
