@@ -46,10 +46,11 @@ class ApiSettings(BaseModel):
 
 
 class WorkerSettings(BaseModel):
-    """Stream worker: overlay refresh interval and default input URL."""
+    """Stream worker: overlay refresh interval, default input URL, and source retry interval."""
 
     overlay_refresh_interval_seconds: int = 8
     default_input_url: str = "rtsp://localhost:554/stream"
+    source_retry_interval_seconds: float = 5.0
 
 
 class Settings(BaseSettings):

@@ -71,10 +71,8 @@ def run_pipeline(input_path: str) -> None:
                             pass
         except Exception as e:
             logger.warning("%s", e)
-            if container is None and _last_frame_holder[0] is None:
-                raise
             if container is None:
-                time.sleep(0.5)
+                time.sleep(get_settings().worker.source_retry_interval_seconds)
                 continue
         finally:
             if container is not None:
