@@ -6,6 +6,7 @@ import html
 import json
 import logging
 from datetime import datetime
+from typing import cast
 
 import stripe
 from flask import Flask, Response, jsonify, redirect, request
@@ -13,9 +14,14 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from config.settings import get_settings
-from stream_workers.db import Donor, OverlayPaymentLink, PIXAlert, RankingEntry, get_engine
-
 from overlay_api import youtube as youtube_module
+from stream_workers.db import (
+    Donor,
+    OverlayPaymentLink,
+    PIXAlert,
+    RankingEntry,
+    get_engine,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -150,7 +156,12 @@ def put_payment_link() -> tuple[Response, int]:
     with Session(engine) as session:
         row = session.get(OverlayPaymentLink, 1)
         if row is None:
-            row = OverlayPaymentLink(id=1, url=url, label=label or None, active=active if active is not None else bool(url))
+            row = OverlayPaymentLink(
+                id=1,
+                url=url,
+                label=label or None,
+                active=active if active is not None else bool(url),
+            )
             session.add(row)
         else:
             if url is not None:
@@ -187,7 +198,7 @@ def stripe_webhook() -> tuple[Response, int]:
     payload = request.get_data()
     sig_header = request.headers.get("Stripe-Signature", "")
     try:
-        event = stripe.Webhook.construct_event(payload, sig_header, secret)
+        event = stripe.Webhook.construct_event(payload, sig_header, secret)  # type: ignore[no-untyped-call]
     except (ValueError, stripe.SignatureVerificationError):
         return jsonify({"error": "Invalid signature"}), 400
     if event["id"] in _processed_stripe_event_ids:
@@ -197,7 +208,7 @@ def stripe_webhook() -> tuple[Response, int]:
         session_data = event.get("data", {}).get("object", {})
         amount_total = session_data.get("amount_total") or 0
         amount_float = amount_total / 100.0
-        customer_email = (session_data.get("customer_email") or session_data.get("customer_details", {}).get("email") or "")
+        customer_email = session_data.get("customer_email") or session_data.get("customer_details", {}).get("email") or ""
         identifier = customer_email or f"Stripe-{session_data.get('id', 'unknown')}"
         engine = get_engine()
         with Session(engine) as session:
@@ -217,7 +228,7 @@ def youtube_connect() -> tuple[Response, int] | Response:
     url = youtube_module.build_connect_url(redirect_uri=redirect_uri)
     if not url:
         return jsonify({"error": "YOUTUBE__CLIENT_ID not set"}), 400
-    return redirect(url)
+    return cast(Response, redirect(url))
 
 
 @app.route("/youtube/callback", methods=["GET"])

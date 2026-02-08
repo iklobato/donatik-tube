@@ -69,16 +69,12 @@ def get_engine() -> Engine:
     eng = _engine_holder[0]
     if eng is not None:
         return eng
-    eng = create_engine(
-        get_settings().db.database_url(), pool_pre_ping=True
-    )
+    eng = create_engine(get_settings().db.database_url(), pool_pre_ping=True)
     _engine_holder[0] = eng
     return eng
 
 
-def get_overlay_snapshot() -> tuple[
-    list[dict[str, Any]], list[dict[str, Any]], dict[str, Any] | None
-]:
+def get_overlay_snapshot() -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any] | None]:
     """
     Return (ranking, active_pix_alerts, payment_link) in one transaction.
     payment_link is {"url": str, "label": str} when overlay_payment_link has url and active true, else None.
@@ -88,27 +84,17 @@ def get_overlay_snapshot() -> tuple[
     now = datetime.now(UTC)
     with Session(engine) as session:
         ranking = []
-        for row in session.execute(
-            text(
-                "SELECT position, identifier, amount FROM ranking_entries ORDER BY position LIMIT 10"
-            )
-        ).fetchall():
+        for row in session.execute(text("SELECT position, identifier, amount FROM ranking_entries ORDER BY position LIMIT 10")).fetchall():
             ranking.append({"position": row[0], "identifier": row[1], "amount": row[2]})
         alerts = []
         for row in session.execute(
-            text(
-                "SELECT id, message FROM pix_alerts WHERE show_at <= :now AND hide_at > :now ORDER BY created_at"
-            ),
+            text("SELECT id, message FROM pix_alerts WHERE show_at <= :now AND hide_at > :now ORDER BY created_at"),
             {"now": now},
         ).fetchall():
             alerts.append({"id": row[0], "message": row[1]})
         link_row = session.get(OverlayPaymentLink, 1)
         payment_link: dict[str, Any] | None = None
-        if (
-            link_row is not None
-            and link_row.url
-            and link_row.active
-        ):
+        if link_row is not None and link_row.url and link_row.active:
             payment_link = {
                 "url": link_row.url,
                 "label": link_row.label or "",

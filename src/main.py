@@ -19,10 +19,7 @@ logger = logging.getLogger(__name__)
 
 # Stub overlay data until DB connected; then refresh loop updates it
 overlay.set_overlay_data(
-    [
-        {"position": i, "identifier": f"Donor{i}", "amount": 100 - i}
-        for i in range(1, 11)
-    ],
+    [{"position": i, "identifier": f"Donor{i}", "amount": 100 - i} for i in range(1, 11)],
     [{"message": "PIX received from Donor1"}],
 )
 

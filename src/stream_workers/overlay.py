@@ -39,9 +39,7 @@ def set_overlay_data(
     _overlay_state.payment_link = payment_link
 
 
-def get_overlay_data() -> tuple[
-    list[dict[str, Any]], list[dict[str, Any]], dict[str, Any] | None
-]:
+def get_overlay_data() -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any] | None]:
     """Return (ranking, alerts, payment_link) for rendering. Uses last known if DB failed."""
     return (_overlay_state.ranking, _overlay_state.alerts, _overlay_state.payment_link)
 

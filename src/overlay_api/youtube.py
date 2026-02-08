@@ -10,6 +10,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from typing import Any, cast
 
 from config.settings import get_settings
 
@@ -41,23 +42,25 @@ def build_connect_url(redirect_uri: str, state: str | None = None) -> str | None
     return f"{AUTH_URL}?{urllib.parse.urlencode(params)}"
 
 
-def exchange_code_for_tokens(code: str, redirect_uri: str) -> dict | None:
+def exchange_code_for_tokens(code: str, redirect_uri: str) -> dict[str, Any] | None:
     """Exchange authorization code for access_token and refresh_token. Returns dict or None on error."""
     yt = get_settings().youtube
     if not yt.client_id or not yt.client_secret:
         return None
-    data = urllib.parse.urlencode({
-        "code": code,
-        "client_id": yt.client_id,
-        "client_secret": yt.client_secret,
-        "redirect_uri": redirect_uri,
-        "grant_type": "authorization_code",
-    }).encode()
+    data = urllib.parse.urlencode(
+        {
+            "code": code,
+            "client_id": yt.client_id,
+            "client_secret": yt.client_secret,
+            "redirect_uri": redirect_uri,
+            "grant_type": "authorization_code",
+        }
+    ).encode()
     req = urllib.request.Request(TOKEN_URL, data=data, method="POST")
     req.add_header("Content-Type", "application/x-www-form-urlencoded")
     try:
         with urllib.request.urlopen(req) as resp:
-            return json.loads(resp.read().decode())
+            return cast(dict[str, Any], json.loads(resp.read().decode()))
     except (urllib.error.HTTPError, urllib.error.URLError, json.JSONDecodeError) as e:
         logger.warning("Token exchange failed: %s", e)
         return None
@@ -74,8 +77,14 @@ def get_channel_id(access_token: str) -> str | None:
             data = json.loads(resp.read().decode())
         items = data.get("items", [])
         if items:
-            return items[0].get("id")
-    except (urllib.error.HTTPError, urllib.error.URLError, json.JSONDecodeError, KeyError) as e:
+            channel_id = items[0].get("id")
+            return str(channel_id) if channel_id is not None else None
+    except (
+        urllib.error.HTTPError,
+        urllib.error.URLError,
+        json.JSONDecodeError,
+        KeyError,
+    ) as e:
         logger.warning("Get channel id failed: %s", e)
     return None
 
@@ -85,18 +94,20 @@ def refresh_access_token(refresh_token: str) -> str | None:
     yt = get_settings().youtube
     if not yt.client_id or not yt.client_secret:
         return None
-    data = urllib.parse.urlencode({
-        "client_id": yt.client_id,
-        "client_secret": yt.client_secret,
-        "refresh_token": refresh_token,
-        "grant_type": "refresh_token",
-    }).encode()
+    data = urllib.parse.urlencode(
+        {
+            "client_id": yt.client_id,
+            "client_secret": yt.client_secret,
+            "refresh_token": refresh_token,
+            "grant_type": "refresh_token",
+        }
+    ).encode()
     req = urllib.request.Request(TOKEN_URL, data=data, method="POST")
     req.add_header("Content-Type", "application/x-www-form-urlencoded")
     try:
         with urllib.request.urlopen(req) as resp:
             out = json.loads(resp.read().decode())
-        return out.get("access_token")
+        return cast(str | None, out.get("access_token"))
     except (urllib.error.HTTPError, urllib.error.URLError, json.JSONDecodeError) as e:
         logger.warning("Token refresh failed: %s", e)
         return None
@@ -108,7 +119,7 @@ def get_ingestion_urls() -> list[str]:
     return list of rtmp://ingestionAddress/streamName.
     """
     from google.oauth2.credentials import Credentials
-    from googleapiclient.discovery import build
+    from googleapiclient.discovery import build  # type: ignore[import-untyped]
 
     yt = get_settings().youtube
     if not yt.client_id or not yt.client_secret or not yt.refresh_tokens.strip():
@@ -127,7 +138,7 @@ def get_ingestion_urls() -> list[str]:
         access_token = refresh_access_token(ref_tok)
         if not access_token:
             continue
-        creds = Credentials(token=access_token)
+        creds = Credentials(token=access_token)  # type: ignore[no-untyped-call]
         try:
             youtube = build("youtube", "v3", credentials=creds)
 
@@ -145,13 +156,17 @@ def get_ingestion_urls() -> list[str]:
                 stream_name = ing.get("streamName")
             if not stream_id or not ingestion_address or not stream_name:
                 # Create new stream (insert returns the resource directly)
-                s = youtube.liveStreams().insert(
-                    part="snippet,cdn,status",
-                    body={
-                        "snippet": {"title": "Donatik Live"},
-                        "cdn": {"resolution": "1080p", "frameRate": "30fps"},
-                    },
-                ).execute()
+                s = (
+                    youtube.liveStreams()
+                    .insert(
+                        part="snippet,cdn,status",
+                        body={
+                            "snippet": {"title": "Donatik Live"},
+                            "cdn": {"resolution": "1080p", "frameRate": "30fps"},
+                        },
+                    )
+                    .execute()
+                )
                 stream_id = s.get("id")
                 cdn = s.get("cdn", {})
                 ing = cdn.get("ingestionInfo", {})
@@ -166,10 +181,14 @@ def get_ingestion_urls() -> list[str]:
             urls.append(rtmp_url)
 
             # Ensure a broadcast is bound to this stream
-            broadcast_list = youtube.liveBroadcasts().list(
-                part="id,contentDetails",
-                broadcastStatus="all",
-            ).execute()
+            broadcast_list = (
+                youtube.liveBroadcasts()
+                .list(
+                    part="id,contentDetails",
+                    broadcastStatus="all",
+                )
+                .execute()
+            )
             bound_broadcast_id = None
             for b in broadcast_list.get("items", []):
                 if b.get("contentDetails", {}).get("boundStreamId") == stream_id:
@@ -177,13 +196,20 @@ def get_ingestion_urls() -> list[str]:
                     break
             if not bound_broadcast_id:
                 # Create broadcast and bind (insert returns the resource directly)
-                insert_b = youtube.liveBroadcasts().insert(
-                    part="snippet,status",
-                    body={
-                        "snippet": {"title": "Donatik Live", "scheduledStartTime": "2030-01-01T00:00:00Z"},
-                        "status": {"privacyStatus": "unlisted"},
-                    },
-                ).execute()
+                insert_b = (
+                    youtube.liveBroadcasts()
+                    .insert(
+                        part="snippet,status",
+                        body={
+                            "snippet": {
+                                "title": "Donatik Live",
+                                "scheduledStartTime": "2030-01-01T00:00:00Z",
+                            },
+                            "status": {"privacyStatus": "unlisted"},
+                        },
+                    )
+                    .execute()
+                )
                 bid = insert_b.get("id")
                 if bid:
                     youtube.liveBroadcasts().bind(part="id,contentDetails", id=bid, streamId=stream_id).execute()
@@ -244,4 +270,7 @@ def start_youtube_push_refresh_thread() -> None:
         return
     t = threading.Thread(target=_youtube_push_refresh_loop, daemon=True)
     t.start()
-    logger.info("YouTube push refresh thread started (interval=%ss)", yt.refresh_interval_seconds)
+    logger.info(
+        "YouTube push refresh thread started (interval=%ss)",
+        yt.refresh_interval_seconds,
+    )
