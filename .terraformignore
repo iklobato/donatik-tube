@@ -1,0 +1,9 @@
+.terraform/
+*.tfstate
+*.tfstate.*
+.terraform.lock.hcl
+*.log
+.git/
+.gitignore
+*.md
+specs/
