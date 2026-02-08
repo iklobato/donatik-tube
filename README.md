@@ -8,17 +8,171 @@ This guide explains everything you need to deploy the stack on Google Cloud Plat
 
 ## Table of contents
 
-1. [Prerequisites](#prerequisites)
-2. [GCP project setup](#gcp-project-setup)
-3. [Deploy infrastructure with Terraform](#deploy-infrastructure-with-terraform)
-4. [Cloud SQL: create user and get connection details](#cloud-sql-create-user-and-get-connection-details)
-5. [Configuration and secrets](#configuration-and-secrets)
-6. [Initialize the database](#initialize-the-database)
-7. [Run the stack (Docker Compose)](#run-the-stack-docker-compose)
-8. [Ingest stream and push to YouTube Live](#ingest-stream-and-push-to-youtube-live)
-9. [Overlay API and data](#overlay-api-and-data)
-10. [Architecture summary](#architecture-summary)
-11. [Troubleshooting](#troubleshooting)
+1. [How it works (diagrams)](#how-it-works-diagrams)
+2. [Prerequisites](#prerequisites)
+3. [GCP project setup](#gcp-project-setup)
+4. [Deploy infrastructure with Terraform](#deploy-infrastructure-with-terraform)
+5. [Cloud SQL: create user and get connection details](#cloud-sql-create-user-and-get-connection-details)
+6. [Configuration and secrets](#configuration-and-secrets)
+7. [Initialize the database](#initialize-the-database)
+8. [Run the stack (Docker Compose)](#run-the-stack-docker-compose)
+9. [Ingest stream and push to YouTube Live](#ingest-stream-and-push-to-youtube-live)
+10. [Overlay API and data](#overlay-api-and-data)
+11. [Architecture summary](#architecture-summary)
+12. [Troubleshooting](#troubleshooting)
+
+---
+
+## How it works (diagrams)
+
+### System overview
+
+```mermaid
+flowchart TB
+    subgraph GCP["GCP (Terraform)"]
+        VPC[VPC + Subnet]
+        FW[Firewall 1935, 554]
+        VM[Compute Engine VM]
+        DB[(Cloud SQL PostgreSQL)]
+        VPC --> FW
+        VPC --> VM
+        VPC --> DB
+    end
+
+    subgraph Docker["Docker Compose (on VM or local)"]
+        NGINX[Nginx-RTMP<br/>ingest :1935]
+        WORKER[Stream Worker<br/>demux → overlay → encode]
+        API[Overlay API<br/>:5001]
+        PROXY[Cloud SQL Auth Proxy]
+        NGINX --> WORKER
+        WORKER --> PROXY
+        API --> PROXY
+        PROXY --> DB
+    end
+
+    OBS[OBS / Encoder] -->|RTMP| NGINX
+    BACKEND[Donation backend] -->|POST /donors, /alerts, /ranking| API
+```
+
+Terraform provisions the network, VM, and Cloud SQL. Docker Compose runs Nginx-RTMP (ingest), the stream worker, the overlay API, and optionally the Cloud SQL Auth Proxy. Workers and the API talk to PostgreSQL via the proxy or the instance private IP.
+
+### Stream and data flow
+
+```mermaid
+flowchart LR
+    subgraph Input
+        RTMP[RTMP ingest :1935]
+        FILE[File / RTSP URL]
+    end
+
+    subgraph Worker["Stream worker"]
+        DEMUX[Demux<br/>PyAV]
+        OVERLAY[Overlay<br/>Top 10 + PIX]
+        PTS[PTS/DTS<br/>continuity]
+        ENC[Encode<br/>H.264 CBR]
+        DEMUX --> OVERLAY --> PTS --> ENC
+    end
+
+    subgraph Data
+        DB[(Cloud SQL)]
+        DB -.->|read ranking & alerts| OVERLAY
+    end
+
+    RTMP --> DEMUX
+    FILE --> DEMUX
+    ENC --> OUT[Encoded stream]
+```
+
+Input can be RTMP (from Nginx-RTMP) or a file/RTSP URL. The worker demuxes, applies overlay data from the DB, rewrites timestamps for continuity, and encodes to H.264. The overlay API (not shown here) writes donors, alerts, and ranking into the same DB.
+
+### Worker pipeline (detail)
+
+```mermaid
+sequenceDiagram
+    participant Input as Input (file / RTSP)
+    participant Demux as Demux
+    participant Decode as Decode
+    participant Overlay as Overlay
+    participant PTS as PTS/DTS
+    participant Encode as Encode
+    participant DB as Database
+
+    loop Every N seconds
+        Overlay->>DB: get_overlay_snapshot()
+        DB-->>Overlay: ranking, alerts
+    end
+
+    loop Per stream
+        Demux->>Input: open_input()
+        Input-->>Demux: container
+        loop Packets
+            Demux->>Decode: packets
+            Decode->>Decode: decode to frames
+            Decode->>Overlay: video frame
+            Overlay->>Overlay: draw ranking + alerts
+            Overlay->>PTS: frame
+            PTS->>PTS: rewrite pts/dts (monotonic)
+            PTS->>Encode: frame
+            Encode->>Encode: H.264 encode
+        end
+    end
+```
+
+The worker opens the input (file or RTSP), demuxes packets, decodes to frames, draws the overlay from the latest DB snapshot, rewrites PTS/DTS for smooth playback, and encodes to H.264. Overlay data is refreshed periodically from the database.
+
+### Infrastructure (Terraform)
+
+```mermaid
+flowchart TB
+    subgraph Terraform["Terraform modules"]
+        NET[network<br/>VPC, subnet]
+        FW[firewall<br/>ingress 1935, 554]
+        SQL[cloud-sql<br/>PostgreSQL private IP]
+        COMPUTE[compute<br/>Debian VM]
+        IAM[iam<br/>service account]
+    end
+
+    NET --> FW
+    NET --> SQL
+    NET --> COMPUTE
+    IAM --> COMPUTE
+    COMPUTE -->|Cloud SQL Client| SQL
+```
+
+Terraform creates the VPC and subnet, firewall rules for RTMP (1935) and RTSP (554), a private-IP-only Cloud SQL instance, a Compute Engine VM, and an IAM service account so the VM can connect to Cloud SQL.
+
+### Component summary
+
+```mermaid
+flowchart TB
+    subgraph Apps
+        N[Nginx-RTMP]
+        W[Worker]
+        A[Overlay API]
+    end
+
+    subgraph Storage
+        P[(PostgreSQL)]
+    end
+
+    subgraph External
+        Y[YouTube Live]
+        C[Clients]
+    end
+
+    C -->|RTMP| N
+    N --> W
+    W -->|read| P
+    A -->|write| P
+    W -->|optional push| Y
+```
+
+| Component     | Role |
+|---------------|------|
+| **Nginx-RTMP** | Accepts RTMP ingest on port 1935; can push to YouTube or other RTMP destinations. |
+| **Worker**     | Reads video from RTMP/file/RTSP, applies overlay from DB, keeps PTS/DTS continuous, encodes to H.264. |
+| **Overlay API**| REST API to write donors, ranking, and PIX alerts into the database. |
+| **PostgreSQL** | Stores overlay data; read by workers, written by the overlay API. |
 
 ---
 
@@ -261,6 +415,8 @@ To run **on the GCP VM**:
 ---
 
 ## Architecture summary
+
+See the [How it works (diagrams)](#how-it-works-diagrams) section for Mermaid diagrams (system overview, stream flow, worker pipeline, Terraform, and component summary).
 
 | Component        | Purpose |
 |-----------------|---------|
