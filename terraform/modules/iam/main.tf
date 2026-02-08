@@ -1,5 +1,11 @@
 # Service account with minimal roles for VM and Cloud SQL access.
 
+resource "google_project_service" "youtube" {
+  project           = var.project_id
+  service           = "youtube.googleapis.com"
+  disable_on_destroy = false
+}
+
 resource "google_service_account" "worker" {
   account_id   = var.service_account_id
   project      = var.project_id
