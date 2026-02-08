@@ -5,14 +5,14 @@ description = "24/7 multicanal streaming infrastructure (GCP) - stream workers a
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "av>=12.0.0",
-    "Flask>=3.0.0",
-    "google-api-python-client>=2.0.0",
-    "Pillow>=10.0.0",
-    "pydantic>=2.0.0",
-    "pydantic-settings>=2.0.0",
-    "SQLAlchemy>=2.0.0",
-    "stripe>=8.0.0",
+    "av==16.1.0",
+    "Flask==3.1.2",
+    "google-api-python-client==2.189.0",
+    "Pillow==12.1.0",
+    "pydantic==2.12.5",
+    "pydantic-settings==2.12.0",
+    "SQLAlchemy==2.0.46",
+    "stripe==14.3.0",
 ]
 
 [build-system]
@@ -34,13 +34,13 @@ dev = [
 ]
 
 [tool.black]
-line-length = 88
+line-length = 140
 target-version = ["py311"]
 include = '\.pyi?$'
 extend-exclude = '\.git|\.terraform|__pycache__'
 
 [tool.ruff]
-line-length = 88
+line-length = 140
 target-version = "py311"
 src = ["src", "scripts"]
 exclude = [".git", ".terraform", "__pycache__"]
@@ -75,3 +75,4 @@ show_error_codes = true
 module = "av"
 ignore_missing_imports = true
 follow_imports = "skip"
+
