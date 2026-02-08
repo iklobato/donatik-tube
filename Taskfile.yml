@@ -1,11 +1,9 @@
-# Taskfile for donate-streaming. Deploy with gcloud; this file is for local/dev.
+# Taskfile for donate-streaming. Manual deploy from host.
 version: "3"
 
 vars:
   UV: uv
-  TF_DIR: terraform
   TF_ENV: terraform/environments/prod
-  # gcloud: override via env or -v (e.g. task gcloud:ssh -v GCP_ZONE:us-east1-b)
   GCP_PROJECT: donatik-486803
   GCP_VM: streaming-worker-vm
   GCP_ZONE: us-central1-a
@@ -13,72 +11,42 @@ vars:
 
 tasks:
   default:
-    desc: List available tasks (run "task --list" or "task <category>:<name>").
+    desc: List tasks (task --list).
     cmds:
       - task --list
 
-  # --- deps ---
   deps:install:
-    desc: Install Python dependencies from uv.lock (single source of truth; run after clone or when lockfile changes).
+    desc: Install Python deps (uv sync).
     cmds:
       - "{{.UV}} sync"
 
-  deps:lock:
-    desc: Regenerate uv.lock from pyproject.toml (e.g. after adding or bumping a dependency).
-    cmds:
-      - "{{.UV}} lock"
-
-  # --- code ---
-  code:lint:
-    desc: Run ruff and black in check-only mode on src/ and scripts/ (fails if style or lint issues).
-    cmds:
-      - "{{.UV}} run ruff check src scripts"
-      - "{{.UV}} run black --check src scripts"
-
-  code:fmt:
-    desc: Format Python code with black (writes changes to src/ and scripts/).
+  code:
+    desc: Format then lint and typecheck (black, ruff, mypy).
     cmds:
       - "{{.UV}} run black src scripts"
-
-  code:typecheck:
-    desc: Run mypy on src/ for static type checking.
-    cmds:
+      - "{{.UV}} run ruff check src scripts"
+      - "{{.UV}} run black --check src scripts"
       - "{{.UV}} run mypy src"
 
-  # --- test ---
   test:run:
-    desc: Run pytest test suite.
+    desc: Run pytest.
     cmds:
       - "{{.UV}} run pytest"
 
-  # --- app ---
   app:api:
-    desc: Run the overlay API locally (needs DB__* or .env; deploy with gcloud).
+    desc: Run overlay API locally (port 5099).
     env:
       API__PORT: "5099"
     cmds:
       - "{{.UV}} run overlay-api"
 
   app:init-db:
-    desc: Create database schema (run once; set DB__* or use .env; uses scripts/init_db.py).
+    desc: Create DB schema (run once; set DB__* or .env).
     cmds:
       - "{{.UV}} run python scripts/init_db.py"
 
-  # --- terraform ---
-  tf:init:
-    desc: Initialize Terraform in terraform/ and fetch providers (uses .terraform.lock.hcl).
-    dir: "{{.TF_DIR}}"
-    cmds:
-      - terraform init -input=false
-
-  tf:validate:
-    desc: Validate Terraform configuration in terraform/ (syntax and consistency).
-    dir: "{{.TF_DIR}}"
-    cmds:
-      - terraform validate
-
   tf:plan:
-    desc: Run terraform plan in terraform/environments/prod (shows planned changes; apply via your gcloud/deploy flow).
+    desc: Terraform init + plan in prod.
     dir: "{{.TF_ENV}}"
     cmds:
       - terraform init -input=false
@@ -90,96 +58,53 @@ tasks:
         fi
 
   tf:output:
-    desc: Show Terraform outputs for prod (cloud_sql_connection_name, compute_network_ip).
+    desc: Show Terraform outputs (prod).
     dir: "{{.TF_ENV}}"
     cmds:
       - terraform output
 
-  # --- gcloud ---
-  gcloud:auth-login:
-    desc: Authenticate with gcloud (opens browser; use for gcloud CLI and compute ssh/scp).
+  tf:apply:
+    desc: Terraform init + apply in prod (deploy; uses tfvars or example).
+    dir: "{{.TF_ENV}}"
     cmds:
-      - gcloud auth login
-
-  gcloud:auth-adc:
-    desc: Set Application Default Credentials (opens browser). Pass GCP_PROJECT to use a specific project (e.g. -v GCP_PROJECT:my-project).
-    cmds:
+      - terraform init -input=false
       - |
-        if [ -n "{{.GCP_PROJECT}}" ]; then
-          echo "Setting project to {{.GCP_PROJECT}} before ADC login..."
-          gcloud config set project "{{.GCP_PROJECT}}"
+        if [ -f terraform.tfvars ]; then
+          terraform apply -var-file=terraform.tfvars -auto-approve
+        else
+          terraform apply -var-file=terraform.tfvars.example -auto-approve
         fi
+
+  gcloud:auth:
+    desc: Enable APIs, set project, auth login + application-default login.
+    cmds:
+      - gcloud services enable compute.googleapis.com sqladmin.googleapis.com iam.googleapis.com youtube.googleapis.com
+      - |
+        [ -n "{{.GCP_PROJECT}}" ] && gcloud config set project "{{.GCP_PROJECT}}"
+        gcloud auth login
         gcloud auth application-default login
 
-  gcloud:auth-list:
-    desc: List gcloud accounts and show which is active.
-    cmds:
-      - gcloud auth list
-
-  gcloud:project-set:
-    desc: Set default gcloud project (pass GCP_PROJECT, e.g. task gcloud:project-set -v GCP_PROJECT:my-project).
-    cmds:
-      - |
-        if [ -z "{{.GCP_PROJECT}}" ]; then
-          echo "Usage: task gcloud:project-set -v GCP_PROJECT:your-project-id"
-          echo "Or:   GCP_PROJECT=your-project-id task gcloud:project-set"
-          exit 1
-        fi
-        gcloud config set project "{{.GCP_PROJECT}}"
-        echo "Project set to {{.GCP_PROJECT}}"
-
-  gcloud:config:
-    desc: Show current gcloud project and account (set project with gcloud config set project ID).
-    cmds:
-      - gcloud config get-value project 2>/dev/null || true
-      - gcloud config get-value account 2>/dev/null || true
-
-  gcloud:apis-enable:
-    desc: Enable GCP APIs required for this project (compute, sqladmin, iam, youtube).
-    cmds:
-      - gcloud services enable compute.googleapis.com
-      - gcloud services enable sqladmin.googleapis.com
-      - gcloud services enable iam.googleapis.com
-      - gcloud services enable youtube.googleapis.com
-
   gcloud:ssh:
-    desc: SSH into the streaming VM (uses GCP_VM, GCP_ZONE; project from gcloud config).
+    desc: SSH into VM.
     cmds:
       - gcloud compute ssh "{{.GCP_VM}}" --zone "{{.GCP_ZONE}}"
 
   gcloud:scp-docker:
-    desc: Copy docker/ directory to VM home/donate-docker (for deploy; set GCP_VM, GCP_ZONE).
+    desc: Copy docker/ to VM.
     cmds:
       - gcloud compute scp --recurse docker "{{.GCP_VM}}:donate-docker" --zone "{{.GCP_ZONE}}"
 
   gcloud:proxy:
-    desc: Run Cloud SQL Auth Proxy locally (connection name from tf output; needs cloud-sql-proxy binary).
+    desc: Run Cloud SQL Auth Proxy via Docker (tf output connection name).
     cmds:
       - |
         CONN="$(cd {{.TF_ENV}} && terraform output -raw cloud_sql_connection_name 2>/dev/null)" || true
-        if [ -z "$CONN" ]; then
-          echo "Run terraform apply first and ensure cloud_sql_connection_name output exists."
-          exit 1
-        fi
-        echo "Starting proxy for $CONN on port {{.GCP_PROXY_PORT}}"
-        exec cloud-sql-proxy --port "{{.GCP_PROXY_PORT}}" "$CONN"
-
-  gcloud:proxy-docker:
-    desc: Run Cloud SQL Auth Proxy via Docker (connection name from tf output; no binary needed).
-    cmds:
-      - |
-        CONN="$(cd {{.TF_ENV}} && terraform output -raw cloud_sql_connection_name 2>/dev/null)" || true
-        if [ -z "$CONN" ]; then
-          echo "Run terraform apply first and ensure cloud_sql_connection_name output exists."
-          exit 1
-        fi
-        echo "Starting proxy for $CONN on port {{.GCP_PROXY_PORT}}"
+        [ -z "$CONN" ] && { echo "Run terraform apply first."; exit 1; }
         docker run --rm -p "{{.GCP_PROXY_PORT}}:5432" gcr.io/cloud-sql-connectors/cloud-sql-proxy:latest "$CONN"
 
-  # --- check ---
   check:
-    desc: Install deps, then run lint and tests (use before commit or in CI).
+    desc: Install deps, code, test:run.
     deps:
       - deps:install
-      - code:lint
+      - code
       - test:run
