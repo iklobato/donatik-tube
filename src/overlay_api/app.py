@@ -1,17 +1,21 @@
 """
-Internal API: write Donor, RankingEntry, PIXAlert, OverlayPaymentLink; Stripe webhook for payment-to-donor sync.
+Internal API: write Donor, RankingEntry, PIXAlert, OverlayPaymentLink; Stripe webhook; YouTube OAuth and push refresh.
 """
 
+import html
+import json
 import logging
 from datetime import datetime
 
 import stripe
-from flask import Flask, Response, jsonify, request
+from flask import Flask, Response, jsonify, redirect, request
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from config.settings import get_settings
 from stream_workers.db import Donor, OverlayPaymentLink, PIXAlert, RankingEntry, get_engine
+
+from overlay_api import youtube as youtube_module
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -203,8 +207,60 @@ def stripe_webhook() -> tuple[Response, int]:
     return jsonify({"received": True}), 200
 
 
+@app.route("/youtube/connect", methods=["GET"])
+def youtube_connect() -> tuple[Response, int] | Response:
+    """Redirect to Google OAuth for YouTube. Optional: require payment-link auth."""
+    auth_fail = _require_payment_link_auth()
+    if auth_fail is not None:
+        return auth_fail
+    redirect_uri = request.url_root.rstrip("/") + "/youtube/callback"
+    url = youtube_module.build_connect_url(redirect_uri=redirect_uri)
+    if not url:
+        return jsonify({"error": "YOUTUBE__CLIENT_ID not set"}), 400
+    return redirect(url)
+
+
+@app.route("/youtube/callback", methods=["GET"])
+def youtube_callback() -> tuple[Response, int] | Response:
+    """Exchange code for tokens; show page with refresh_token to add to .env."""
+    code = request.args.get("code")
+    if not code:
+        return jsonify({"error": "missing code"}), 400
+    redirect_uri = request.url_root.rstrip("/") + "/youtube/callback"
+    tokens = youtube_module.exchange_code_for_tokens(code=code, redirect_uri=redirect_uri)
+    if not tokens:
+        return jsonify({"error": "token exchange failed"}), 400
+    refresh_token = tokens.get("refresh_token")
+    if not refresh_token:
+        return jsonify({"error": "no refresh_token in response"}), 400
+    access_token = tokens.get("access_token")
+    channel_id = youtube_module.get_channel_id(access_token) if access_token else None
+    if not channel_id:
+        channel_id = "UC_unknown"
+    env_line = f"YOUTUBE__REFRESH_TOKENS={json.dumps({channel_id: refresh_token})}"
+    env_escaped = html.escape(env_line)
+    html_body = f"""
+    <!DOCTYPE html>
+    <html><body style="font-family:sans-serif;max-width:640px;margin:2em auto;">
+    <h1>YouTube connected</h1>
+    <p>Add this to your <code>.env</code> (merge into existing YOUTUBE__REFRESH_TOKENS JSON if you have other channels):</p>
+    <pre style="background:#eee;padding:1em;overflow:auto;">{env_escaped}</pre>
+    <p>Then restart the overlay API.</p>
+    </body></html>
+    """
+    return Response(html_body, mimetype="text/html")
+
+
 def run() -> None:
     s = get_settings()
+    if s.youtube.client_id and s.youtube.refresh_tokens.strip():
+        try:
+            urls = youtube_module.get_ingestion_urls()
+            youtube_module.write_push_conf(urls)
+            youtube_module.reload_nginx()
+        except Exception as e:
+            logger.warning("YouTube initial push refresh: %s", e)
+        youtube_module.start_youtube_push_refresh_thread()
     app.run(host=s.api.host, port=s.api.port)
 
 
