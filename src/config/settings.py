@@ -39,10 +39,11 @@ class EncodingSettings(BaseModel):
 
 
 class ApiSettings(BaseModel):
-    """Overlay API server bind address and port."""
+    """Overlay API server bind address and port; optional API key for /payment-link (FR-6)."""
 
     host: str = "0.0.0.0"
     port: int = 5001
+    payment_link_api_key: str = ""
 
 
 class WorkerSettings(BaseModel):
@@ -51,6 +52,12 @@ class WorkerSettings(BaseModel):
     overlay_refresh_interval_seconds: int = 8
     default_input_url: str = "rtsp://localhost:554/stream"
     source_retry_interval_seconds: float = 5.0
+
+
+class StripeSettings(BaseModel):
+    """Stripe webhook secret for payment-to-donor sync (FR-5). When empty, webhook is disabled."""
+
+    webhook_secret: str = ""
 
 
 class Settings(BaseSettings):
@@ -68,6 +75,7 @@ class Settings(BaseSettings):
     encoding: EncodingSettings = Field(default_factory=EncodingSettings)
     api: ApiSettings = Field(default_factory=ApiSettings)
     worker: WorkerSettings = Field(default_factory=WorkerSettings)
+    stripe: StripeSettings = Field(default_factory=StripeSettings)
 
 
 @lru_cache(maxsize=1)
