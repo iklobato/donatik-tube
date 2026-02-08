@@ -12,7 +12,7 @@ import time
 import av
 
 from config.settings import get_settings
-from stream_workers import demux, encode, overlay, pts_dts
+from stream_workers import demux, encode, overlay, pts_dts, rtmp_out
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -45,10 +45,12 @@ def _overlay_refresh_loop() -> None:
 
 
 def run_pipeline(input_path: str) -> None:
-    """Run demux → overlay → PTS/DTS → encode. Hold last frame when source unavailable."""
+    """Run demux → overlay → PTS/DTS → encode. Hold last frame when source unavailable. Optional RTMP out."""
     enc = None
+    rtmp_proc = None
     t = threading.Thread(target=_overlay_refresh_loop, daemon=True)
     t.start()
+    rtmp_url = get_settings().worker.rtmp_output_url.strip()
     while True:
         container = None
         try:
@@ -62,13 +64,17 @@ def run_pipeline(input_path: str) -> None:
                 height=video_stream.height or enc_cfg.default_height,
                 fps=enc_cfg.fps,
             )
+            if rtmp_url and rtmp_proc is None:
+                rtmp_proc = rtmp_out.start_rtmp_process(rtmp_url)
             for packet in demux.iter_packets(container):
                 for frame in packet.decode():
                     if isinstance(frame, av.VideoFrame):
                         _last_frame_holder[0] = frame
                         pts_dts.rewrite_pts_dts(frame)
-                        for _pkt in encode.encode_frame(enc, frame):
-                            pass
+                        for pkt in encode.encode_frame(enc, frame):
+                            if rtmp_proc and rtmp_proc.stdin is not None:
+                                if not rtmp_out.write_packet(rtmp_proc, bytes(pkt)):
+                                    rtmp_proc = None
         except Exception as e:
             logger.warning("%s", e)
             if container is None:
@@ -77,6 +83,13 @@ def run_pipeline(input_path: str) -> None:
         finally:
             if container is not None:
                 container.close()
+            if rtmp_proc is not None and rtmp_proc.stdin is not None:
+                try:
+                    rtmp_proc.stdin.close()
+                except OSError:
+                    pass
+                rtmp_proc.wait(timeout=5)
+                rtmp_proc = None
         time.sleep(0.1)
 
 
