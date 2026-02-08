@@ -1,26 +1,27 @@
 # Donatik Tube – 24/7 streaming on GCP
 
-Live streaming pipeline for **YouTube Live**: Terraform-provisioned GCP infrastructure (Compute Engine, Cloud SQL PostgreSQL), Nginx-RTMP ingest, and Python workers for demux, overlay (Top 10 donor ranking, PIX alerts, and a **payment/donation link**), PTS/DTS continuity, and H.264 encode. The worker can publish the encoded stream to Nginx; the **overlay API** writes Nginx push config from the YouTube API and pushes the same stream to **multiple YouTube channels** (no manual stream keys). The overlay API also exposes **payment link** endpoints (GET/PUT), **YouTube OAuth** (/youtube/connect, /youtube/callback), and an optional **Stripe webhook** for payment-to-donor sync.
+Live streaming pipeline for **YouTube Live**: Terraform-provisioned GCP infrastructure (Compute Engine, Cloud SQL PostgreSQL), Nginx-RTMP ingest, and Python workers for demux, overlay (Top 10 donor ranking, PIX alerts, and a **payment/donation link**), PTS/DTS continuity, and H.264 encode. The worker publishes the encoded stream via FFmpeg to an RTMP URL when configured; the **overlay API** obtains ingestion URLs from the YouTube API and writes Nginx push config so the same stream goes to **multiple YouTube channels** (no manual stream keys). The overlay API also exposes **payment link** endpoints (GET/PUT), **YouTube OAuth** (/youtube/connect, /youtube/callback), and an optional **Stripe webhook** for payment-to-donor sync.
 
-This guide explains everything you need to deploy the stack on Google Cloud Platform.
+This guide explains how the system works and how to deploy it on Google Cloud Platform.
 
 ---
 
 ## Table of contents
 
 1. [How it works (diagrams)](#how-it-works-diagrams)
-2. [Prerequisites](#prerequisites)
-3. [GCP project setup](#gcp-project-setup)
-4. [Deploy infrastructure with Terraform](#deploy-infrastructure-with-terraform)
-5. [Cloud SQL: create user and get connection details](#cloud-sql-create-user-and-get-connection-details)
-6. [Configuration and secrets](#configuration-and-secrets)
-7. [Initialize the database](#initialize-the-database)
-8. [Run the stack (Docker Compose)](#run-the-stack-docker-compose)
-9. [Ingest stream and push to YouTube Live](#ingest-stream-and-push-to-youtube-live)
-10. [Overlay API and data](#overlay-api-and-data)
-11. [YouTube Live (multiple accounts)](#youtube-live-multiple-accounts)
-12. [Architecture summary](#architecture-summary)
-13. [Troubleshooting](#troubleshooting)
+2. [Project structure](#project-structure)
+3. [Prerequisites](#prerequisites)
+4. [GCP project setup](#gcp-project-setup)
+5. [Deploy infrastructure with Terraform](#deploy-infrastructure-with-terraform)
+6. [Cloud SQL: create user and get connection details](#cloud-sql-create-user-and-get-connection-details)
+7. [Configuration and secrets](#configuration-and-secrets)
+8. [Initialize the database](#initialize-the-database)
+9. [Run the stack (Docker Compose)](#run-the-stack-docker-compose)
+10. [Ingest stream and push to YouTube Live](#ingest-stream-and-push-to-youtube-live)
+11. [Overlay API and data](#overlay-api-and-data)
+12. [YouTube Live (multiple accounts)](#youtube-live-multiple-accounts)
+13. [Architecture summary](#architecture-summary)
+14. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -28,156 +29,191 @@ This guide explains everything you need to deploy the stack on Google Cloud Plat
 
 ### System overview
 
+The diagram below shows where each component runs and how they connect. **Terraform** provisions the network, VM, and Cloud SQL in GCP. **Docker Compose** runs Nginx-RTMP, the stream worker, the overlay API, and optionally the Cloud SQL Auth Proxy on the VM (or locally). The **worker** reads overlay data from the database and, when `WORKER__RTMP_OUTPUT_URL` is set, publishes the encoded stream to Nginx’s `out` application. The **overlay API** writes push directives to a file that Nginx includes; Nginx then pushes the stream to one or more YouTube channels. External systems (donation backend, Stripe) call the overlay API to write donors, alerts, ranking, and the payment link.
+
 ```mermaid
 flowchart TB
     subgraph GCP["GCP (Terraform)"]
         VPC[VPC + Subnet]
-        FW[Firewall 1935, 554]
+        FW[Firewall: 1935 RTMP, 554 RTSP]
         VM[Compute Engine VM]
         DB[(Cloud SQL PostgreSQL)]
         VPC --> FW
-        VPC --> VM
-        VPC --> DB
+        FW --> VM
+        VM --> DB
     end
 
     subgraph Docker["Docker Compose (on VM or local)"]
-        NGINX[Nginx-RTMP<br/>live :1935, out]
-        WORKER[Stream Worker<br/>demux, overlay, encode]
-        API[Overlay API<br/>:5001]
-        PROXY[Cloud SQL Auth Proxy]
-        WORKER -->|RTMP publish when configured| NGINX
+        NGINX["Nginx-RTMP<br/>live: ingest :1935<br/>out: worker input + YouTube push"]
+        WORKER["Stream worker<br/>main.py: demux → overlay → PTS/DTS → encode → RTMP"]
+        API["Overlay API<br/>Flask :5001"]
+        PROXY["Cloud SQL Auth Proxy"]
+        WORKER -->|publish when WORKER__RTMP_OUTPUT_URL set| NGINX
         WORKER --> PROXY
         API --> PROXY
         PROXY --> DB
     end
 
-    OBS[OBS / Encoder] -->|RTMP ingest| NGINX
-    BACKEND[Donation backend] -->|POST /donors, /alerts, /ranking; GET/PUT /payment-link; /youtube/connect| API
-    NGINX -->|push| YT[YouTube Live]
+    OBS["OBS / Encoder"] -->|RTMP ingest| NGINX
+    BACKEND["Donation backend"] -->|POST /donors, /alerts, /ranking, GET/PUT payment-link, /youtube/connect| API
+    STRIPE["Stripe"] -->|POST /stripe-webhook| API
+    NGINX -->|push to ingestion URLs| YT["YouTube Live<br/>(one or more channels)"]
 ```
 
-Terraform provisions the network, VM, and Cloud SQL and enables the YouTube Data API (IAM module). Docker Compose runs Nginx-RTMP (application `live` for ingest, application `out` for worker RTMP and YouTube push), the stream worker, the overlay API, and optionally the Cloud SQL Auth Proxy. The worker reads overlay data from the DB (via the proxy or private IP) and, when `WORKER__RTMP_OUTPUT_URL` is set, publishes the encoded stream to Nginx `out`. The overlay API writes push URLs to Nginx from the YouTube API and Nginx pushes to one or more YouTube channels. The overlay API also serves the global payment link (GET/PUT `/payment-link`), YouTube OAuth (`/youtube/connect`, `/youtube/callback`), and Stripe webhook (POST `/stripe-webhook`).
+- **Nginx-RTMP**: Application `live` accepts RTMP ingest on port 1935. Application `out` receives the worker’s RTMP publish and includes `conf.d/youtube_push.conf` (push directives written by the overlay API).
+- **Stream worker**: Entrypoint is `src/main.py`. Opens input (file or RTSP URL), demuxes with PyAV, refreshes overlay data from the DB periodically, draws ranking/alerts/payment link, rewrites PTS/DTS, encodes to H.264, and optionally sends H.264 to FFmpeg which publishes to `WORKER__RTMP_OUTPUT_URL`.
+- **Overlay API**: Flask app in `src/overlay_api/app.py`. Writes to the DB; runs a background thread that refreshes YouTube ingestion URLs and writes Nginx push config; serves payment link, YouTube OAuth, and Stripe webhook.
 
 ### Stream and data flow
 
+This diagram shows the **data path**: where video comes from, how the worker processes it, and where overlay data comes from. Input is a **file or RTSP URL** (configurable via `WORKER__default_input_url`). The worker does not read RTMP directly; for OBS you ingest to Nginx `live` and can have the worker pull from another source, or use a separate RTSP/RTMP bridge. The worker reads **ranking, alerts, and payment link** from the database in one atomic snapshot every N seconds; if the DB is unreachable, it keeps the last known overlay. When `WORKER__RTMP_OUTPUT_URL` is set, encoded H.264 is fed to an FFmpeg process that muxes with silent audio and publishes FLV to that RTMP URL (typically Nginx `out`).
+
 ```mermaid
 flowchart LR
-    subgraph Input
-        RTMP[RTMP ingest :1935]
-        FILE[File / RTSP URL]
+    subgraph Input["Input"]
+        FILE["File or RTSP URL<br/>(WORKER__default_input_url)"]
     end
 
-    subgraph Worker["Stream worker"]
-        DEMUX[Demux<br/>PyAV]
-        OVERLAY[Overlay<br/>Top 10 + PIX + payment link]
-        PTS[PTS/DTS<br/>continuity]
-        ENC[Encode<br/>H.264 CBR]
-        DEMUX --> OVERLAY --> PTS --> ENC
+    subgraph Worker["Stream worker (main.py)"]
+        DEMUX["Demux<br/>PyAV"]
+        OVERLAY["Overlay<br/>Top 10 + PIX + payment link"]
+        PTS["PTS/DTS<br/>monotonic rewrite"]
+        ENC["Encode<br/>H.264 CBR"]
+        RTMP["RTMP out<br/>FFmpeg → FLV"]
+        DEMUX --> OVERLAY --> PTS --> ENC --> RTMP
     end
 
-    subgraph Data
-        DB[(Cloud SQL)]
-        DB -.->|read ranking, alerts, payment link| OVERLAY
+    subgraph Data["Database"]
+        DB[(Cloud SQL / SQLite)]
+        DB -.->|get_overlay_snapshot every N s| OVERLAY
     end
 
-    RTMP --> DEMUX
+    subgraph Write["Overlay API"]
+        API_W["POST /donors, /alerts, /ranking<br/>PUT /payment-link"]
+        API_W --> DB
+    end
+
     FILE --> DEMUX
-    ENC --> OUT[Encoded stream]
-    ENC -.->|when WORKER__RTMP_OUTPUT_URL set| RTMPOUT[RTMP to Nginx out]
+    RTMP -.->|when set| NGINX["Nginx out"]
+    NGINX --> YT["YouTube Live"]
 ```
-
-Input is a file or RTSP URL (or RTMP if the worker is configured to read from Nginx). The worker demuxes, applies overlay data (ranking, alerts, and one global payment link) from the DB, rewrites timestamps for continuity, and encodes to H.264. When `WORKER__RTMP_OUTPUT_URL` is set, the encoded stream is also published to that RTMP URL (typically Nginx application `out`); Nginx then pushes to YouTube using URLs written by the overlay API. The overlay API writes donors, alerts, ranking, and the payment link into the same DB and exposes GET/PUT `/payment-link`, YouTube OAuth, and POST `/stripe-webhook`.
 
 ### Worker pipeline (detail)
 
+The worker runs a single pipeline loop: open input → demux packets → decode to frames → draw overlay (from in-memory state updated by a background thread) → rewrite PTS/DTS → encode → optionally write to FFmpeg stdin. A **daemon thread** periodically calls `get_overlay_snapshot()` from `stream_workers.db` and updates the overlay state; if the DB is unreachable, the thread logs and the last known data is kept. On source failure the main loop closes the container, sleeps, and retries; it holds the last video frame so the stream can resume without a black gap.
+
 ```mermaid
 sequenceDiagram
-    participant Input as Input (file / RTSP)
-    participant Demux as Demux
-    participant Decode as Decode
-    participant Overlay as Overlay
-    participant PTS as PTS/DTS
-    participant Encode as Encode
-    participant DB as Database
+    participant Main as main.py
+    participant Demux as demux
+    participant Overlay as overlay
+    participant PTS as pts_dts
+    participant Encode as encode
+    participant DB as stream_workers.db
+    participant Thread as Overlay refresh thread
 
-    loop Every N seconds
-        Overlay->>DB: get_overlay_snapshot()
-        DB-->>Overlay: ranking, alerts, payment_link
+    loop Every overlay_refresh_interval_seconds
+        Thread->>DB: get_overlay_snapshot()
+        DB-->>Thread: ranking, alerts, payment_link
+        Thread->>Overlay: set_overlay_data(...)
     end
 
-    loop Per stream
-        Demux->>Input: open_input()
-        Input-->>Demux: container
-        loop Packets
-            Demux->>Decode: packets
-            Decode->>Decode: decode to frames
-            Decode->>Overlay: video frame
-            Overlay->>Overlay: draw ranking + alerts + payment link
-            Overlay->>PTS: frame
-            PTS->>PTS: rewrite pts/dts (monotonic)
-            PTS->>Encode: frame
-            Encode->>Encode: H.264 encode
+    loop Pipeline (per source)
+        Main->>Demux: open_input(url)
+        Demux-->>Main: container
+        loop For each packet
+            Main->>Demux: iter_packets → decode
+            Main->>Overlay: render_overlay_on_image(frame)
+            Overlay->>Overlay: draw ranking, alerts, payment link
+            Main->>PTS: rewrite_pts_dts(frame)
+            Main->>Encode: encode_frame(encoder, frame)
+            Main->>RTMP: write_packet (if WORKER__RTMP_OUTPUT_URL set)
         end
     end
 ```
 
-The worker opens the input (file or RTSP), demuxes packets, decodes to frames, draws the overlay (ranking, alerts, and payment link when configured) from the latest DB snapshot, rewrites PTS/DTS for smooth playback, and encodes to H.264. Overlay data is refreshed periodically from the database.
-
 ### Infrastructure (Terraform)
+
+Terraform is organized as **root modules** under `terraform/modules/` and a **prod environment** under `terraform/environments/prod/`. The prod `main.tf` wires network → firewall, network → Cloud SQL and compute, and IAM → compute. The VM’s service account has Cloud SQL Client and Logging; the IAM module also enables the YouTube Data API for the project.
 
 ```mermaid
 flowchart TB
-    subgraph Terraform["Terraform modules"]
-        NET[network<br/>VPC, subnet]
-        FW[firewall<br/>ingress 1935, 554]
-        SQL[cloud-sql<br/>PostgreSQL private IP]
-        COMPUTE[compute<br/>Debian VM]
-        IAM[iam<br/>service account]
+    subgraph Prod["terraform/environments/prod"]
+        MOD_NET[module.network<br/>VPC, subnet]
+        MOD_IAM[module.iam<br/>service account + YouTube API]
+        MOD_COMPUTE[module.compute<br/>Debian VM]
+        MOD_SQL[module.cloud_sql<br/>PostgreSQL private IP]
+        MOD_NET --> MOD_COMPUTE
+        MOD_NET --> MOD_SQL
+        MOD_IAM --> MOD_COMPUTE
+        MOD_COMPUTE -->|Cloud SQL Client| MOD_SQL
     end
-
-    NET --> FW
-    NET --> SQL
-    NET --> COMPUTE
-    IAM --> COMPUTE
-    COMPUTE -->|Cloud SQL Client| SQL
 ```
 
-Terraform creates the VPC and subnet, firewall rules for RTMP (1935) and RTSP (554), a private-IP-only Cloud SQL instance, a Compute Engine VM, and an IAM service account so the VM can connect to Cloud SQL.
+- **network**: VPC, subnet (e.g. 10.0.0.0/24), firewall allow 1935 (RTMP) and 554 (RTSP).
+- **cloud-sql**: PostgreSQL instance, private IP only, database name `donate`.
+- **compute**: Debian 12 VM, optional N2/N1 machine type, uses the IAM service account.
+- **iam**: Service account for VM; roles Cloud SQL Client and Logging; enables `youtube.googleapis.com`.
 
 ### Component summary
 
-```mermaid
-flowchart TB
-    subgraph Apps
-        N[Nginx-RTMP]
-        W[Worker]
-        A[Overlay API]
-    end
-
-    subgraph Storage
-        P[(PostgreSQL)]
-    end
-
-    subgraph External
-        Y[YouTube Live]
-        C[Clients]
-    end
-
-    C -->|RTMP ingest| N
-    W -->|read| P
-    W -->|RTMP publish when configured| N
-    N -->|push URLs from overlay API| Y
-    A -->|write| P
-    A -->|write push config| N
-    STRIPE[Stripe] -->|webhook| A
-```
-
 | Component     | Role |
 |---------------|------|
-| **Nginx-RTMP** | Application `live`: RTMP ingest on port 1935. Application `out`: receives worker RTMP publish and pushes to multiple YouTube URLs (push directives written by overlay API to `youtube_push.conf`). |
-| **Worker**     | Reads video from file/RTSP (or RTMP), applies overlay (ranking, alerts, payment link) from DB, keeps PTS/DTS continuous, encodes to H.264. When `WORKER__RTMP_OUTPUT_URL` is set, publishes encoded stream to Nginx `out`. |
-| **Overlay API**| REST API: writes donors, ranking, PIX alerts, payment link; GET/PUT `/payment-link` (optional API key); GET `/youtube/connect`, `/youtube/callback` (OAuth); background refresh of YouTube ingestion URLs and Nginx push config; POST `/stripe-webhook`. |
-| **PostgreSQL** | Stores overlay data (donors, ranking, alerts, overlay_payment_link); read by workers, written by the overlay API. |
+| **Nginx-RTMP** | Application `live`: RTMP ingest on port 1935. Application `out`: receives worker RTMP publish and includes `conf.d/youtube_push.conf` (push lines written by overlay API). Nginx pushes the stream to each URL in that file. |
+| **Stream worker** | Entrypoint `src/main.py`. Reads video from file or RTSP; applies overlay (ranking, alerts, payment link) from DB via periodic snapshot; rewrites PTS/DTS; encodes H.264. When `WORKER__RTMP_OUTPUT_URL` is set, spawns FFmpeg to publish to that RTMP URL. On source failure, retries after a delay; keeps last frame. |
+| **Overlay API** | Flask app (`src/overlay_api/app.py`). Writes donors, ranking, PIX alerts, payment link to DB. GET/PUT `/payment-link` (optional API key). GET `/youtube/connect`, `/youtube/callback` for OAuth. Background thread refreshes YouTube ingestion URLs and writes Nginx push config; reloads Nginx. POST `/stripe-webhook` for payment-to-donor sync. |
+| **PostgreSQL** | Stores donors, ranking_entries, pix_alerts, overlay_payment_link. Read by workers via `get_overlay_snapshot()`; written by overlay API. When `DB__user` is empty, the app uses SQLite (`overlay.db`). |
+
+---
+
+## Project structure
+
+```
+donate/
+├── src/
+│   ├── config/           # Pydantic Settings (DB, API, encoding, worker, YouTube, Stripe)
+│   │   └── settings.py
+│   ├── main.py           # Stream worker entrypoint: demux → overlay → PTS/DTS → encode → optional RTMP
+│   ├── overlay_api/      # Flask API and YouTube push refresh
+│   │   ├── app.py        # Routes: /donors, /alerts, /ranking, /payment-link, /stripe-webhook, /youtube/*
+│   │   └── youtube.py    # OAuth helpers, get_ingestion_urls, write_push_conf, reload nginx
+│   └── stream_workers/
+│       ├── db.py         # SQLAlchemy models, get_engine, get_overlay_snapshot
+│       ├── demux.py      # PyAV open_input, iter_packets, get_video_stream
+│       ├── overlay.py    # set_overlay_data, render_overlay_on_image (Pillow)
+│       ├── pts_dts.py    # rewrite_pts_dts (monotonic timestamps)
+│       ├── encode.py     # create_video_encoder, encode_frame (H.264 CBR)
+│       └── rtmp_out.py   # start_rtmp_process (FFmpeg), write_packet
+├── scripts/
+│   └── init_db.py        # Create tables (donors, ranking_entries, pix_alerts, overlay_payment_link)
+├── tests/
+│   └── test_placeholder.py
+├── docker/
+│   ├── docker-compose.yml   # nginx-rtmp, overlay-api, worker, cloud-sql-auth (profile db)
+│   ├── Dockerfile.worker    # Python 3.11, PyAV, FFmpeg; entrypoint main.py
+│   ├── nginx/
+│   │   ├── nginx.conf       # applications: live, out (include conf.d)
+│   │   └── conf.d/
+│   │       └── youtube_push.conf   # Written by overlay API (push rtmp://...;)
+│   └── test_media/
+├── terraform/
+│   ├── versions.tf        # Provider pins
+│   ├── .terraform.lock.hcl # Provider lock (committed)
+│   ├── modules/
+│   │   ├── network/       # VPC, subnet, firewall 1935, 554
+│   │   ├── compute/       # Debian VM
+│   │   ├── cloud-sql/     # PostgreSQL private IP
+│   │   ├── iam/           # Service account, Cloud SQL Client, Logging, YouTube API
+│   │   └── youtube-secrets/
+│   └── environments/
+│       └── prod/          # main.tf wires modules; terraform.tfvars.example
+├── Taskfile.yml           # deps, lint, test, app:api, app:init-db, tf:init/validate/plan
+├── pyproject.toml         # Dependencies and tool config (ruff, black, mypy)
+├── uv.lock                # Locked dependencies (uv)
+└── .env.example           # DB__*, API__*, WORKER__*, YOUTUBE__*, STRIPE__*, ENCODING__*
+```
+
+**Tasks (run `task --list`):** `deps:install`, `deps:lock`, `code:lint`, `code:fmt`, `code:typecheck`, `test:run`, `app:api` (overlay API on port 5099), `app:init-db`, `tf:init`, `tf:validate`, `tf:plan`, `check`.
 
 ---
 
@@ -186,28 +222,28 @@ flowchart TB
 - **GCP account** with billing enabled.
 - **gcloud CLI** installed and authenticated: `gcloud auth login` and `gcloud config set project YOUR_PROJECT_ID`.
 - **Terraform** ≥ 1.x ([install](https://developer.hashicorp.com/terraform/downloads)).
-- **Docker** and **Docker Compose** (for running Nginx-RTMP, workers, and Cloud SQL Auth Proxy).
-- **Python 3.11+** and **uv** (for local runs and `scripts/init_db.py`; application installs use **pyproject.toml** and **uv.lock** only).
+- **Docker** and **Docker Compose** (for Nginx-RTMP, workers, overlay API, and Cloud SQL Auth Proxy).
+- **Python 3.11+** and **uv** (for local runs, `scripts/init_db.py`, and the Taskfile; application installs use `pyproject.toml` and `uv.lock` only).
 
 ### Application dependencies (Python)
 
-Install from the repo root with **uv** (single source of truth: `pyproject.toml` + `uv.lock`):
+From the repo root with **uv** (single source of truth: `pyproject.toml` + `uv.lock`):
 
 ```bash
 uv sync
 ```
 
-For minimal runtime set (no dev tools): `uv sync --no-dev`. If a pinned dependency cannot be obtained (registry down, package yanked, network failure), the install **fails with a clear error**; do not use alternate sources. See [specs/1-minimal-pinned-deps/quickstart.md](specs/1-minimal-pinned-deps/quickstart.md) for full install and verification steps.
+For minimal runtime (no dev tools): `uv sync --no-dev`.
 
 ### Infrastructure dependencies (Terraform)
 
-Provider versions are pinned in **`terraform/versions.tf`** and locked in **`terraform/.terraform.lock.hcl`** (commit the lockfile for reproducible `terraform init`). From the **`terraform/`** directory:
+Provider versions are pinned in **`terraform/versions.tf`** and locked in **`terraform/.terraform.lock.hcl`** (commit the lockfile for reproducible `terraform init`). From **`terraform/`**:
 
 ```bash
 terraform init
 ```
 
-If a provider cannot be obtained, `terraform init` **fails with a clear error**; do not use alternate sources. See [specs/1-minimal-pinned-deps/quickstart.md](specs/1-minimal-pinned-deps/quickstart.md) for init and verification steps. When a **vulnerability** is known in a pinned dependency, update the version in `pyproject.toml` or `terraform/versions.tf`, run `uv lock` or `terraform init -upgrade` as appropriate, and commit the updated spec and lockfile; see [Updating after a vulnerability](specs/1-minimal-pinned-deps/quickstart.md#updating-after-a-vulnerability) in the quickstart.
+For the prod environment, use `terraform/environments/prod` and `terraform.tfvars` (or `terraform.tfvars.example`). The Taskfile provides `task tf:init`, `task tf:validate`, and `task tf:plan`.
 
 ---
 
@@ -223,7 +259,7 @@ If a provider cannot be obtained, `terraform init` **fails with a clear error**;
    gcloud services enable iam.googleapis.com
    ```
 
-   The Terraform IAM module also enables `youtube.googleapis.com` (YouTube Data API) when you apply; you can enable it manually if you use the API before applying Terraform.
+   The Terraform IAM module also enables `youtube.googleapis.com` when you apply; you can enable it manually if you use the API before applying.
 
 3. Ensure billing is linked to the project (required for Compute Engine and Cloud SQL).
 
@@ -236,7 +272,7 @@ Terraform creates:
 - **VPC** and subnet (ingress allowed only on ports **1935** RTMP and **554** RTSP).
 - **Cloud SQL PostgreSQL** with private IP only (no public IP).
 - **Compute Engine VM** (Debian 12) with a service account that has Cloud SQL Client and Logging.
-- **IAM** service account for the VM.
+- **IAM** service account and YouTube Data API enabled.
 
 Steps:
 
@@ -264,6 +300,8 @@ Steps:
    terraform apply -var-file=terraform.tfvars
    ```
 
+   If `terraform.tfvars` is missing, `task tf:plan` uses `terraform.tfvars.example` so plan can be run without real credentials.
+
 4. Save the outputs; you will need the Cloud SQL connection name and (optionally) the VM private IP:
 
    ```bash
@@ -271,7 +309,7 @@ Steps:
    terraform output compute_network_ip         # private IP of the VM
    ```
 
-The state file is stored locally in `terraform/environments/prod/terraform.tfstate`. For production, consider a remote backend (GCS + state locking).
+State is stored locally in `terraform/environments/prod/terraform.tfstate`. For production, use a remote backend (e.g. GCS with state locking).
 
 ---
 
@@ -282,7 +320,7 @@ The Cloud SQL instance has **private IP only**. To connect you either:
 - Run the **Cloud SQL Auth Proxy** (recommended for local or Docker), or
 - Connect from the **VM** in the same VPC using the instance **private IP**.
 
-1. Create a database user and set a password (if not already done). You can use the GCP Console (Cloud SQL → Users) or `gcloud sql users create`:
+1. Create a database user and set a password (if not already done). Use GCP Console (Cloud SQL → Users) or:
 
    ```bash
    gcloud sql users create YOUR_DB_USER \
@@ -292,25 +330,21 @@ The Cloud SQL instance has **private IP only**. To connect you either:
 
    The database name created by Terraform is `donate` (or the value of `db_name` in the Cloud SQL module).
 
-2. **Connection name** (for Auth Proxy): use the Terraform output:
+2. **Connection name** (for Auth Proxy): use the Terraform output `terraform output cloud_sql_connection_name` (e.g. `your-project:us-central1:streaming-db`).
 
-   - `terraform output cloud_sql_connection_name` → value like `your-project:us-central1:streaming-db`.
-
-3. **Private IP** (for connections from the VM): use Terraform output from the Cloud SQL module, or:
-
-   - GCP Console → Cloud SQL → your instance → **Private IP**.
+3. **Private IP** (for connections from the VM): from Terraform or GCP Console → Cloud SQL → your instance → Private IP.
 
 ---
 
 ## Configuration and secrets
 
-All application settings are centralized in **Pydantic Settings** (`src/config/settings.py`). Environment variables use the form **`SECTION__key`** (double underscore). A `.env` file in the project root is loaded automatically.
+All application settings are in **Pydantic Settings** (`src/config/settings.py`). Environment variables use the form **`SECTION__key`** (double underscore). A `.env` file in the project root is loaded automatically.
 
 ### For Docker Compose (recommended for deployment)
 
-Create a `.env` file in the **`docker/`** directory (or where you run `docker compose`). The Compose file uses `env_file: .env` for the worker, overlay-api, and Cloud SQL Auth Proxy.
+Create a `.env` file in the **`docker/`** directory. The Compose file uses `env_file: .env` for the worker, overlay-api, and Cloud SQL Auth Proxy.
 
-Required for the **Cloud SQL Auth Proxy** (used by Compose):
+Required for the **Cloud SQL Auth Proxy**:
 
 ```bash
 # docker/.env
@@ -320,36 +354,24 @@ CLOUD_SQL_CONNECTION_NAME=your-project:region:streaming-db
 Required for the **app** (database and API):
 
 ```bash
-# Database (app reads DB__* with Pydantic Settings)
 DB__host=cloud-sql-auth
 DB__port=5432
 DB__name=donate
 DB__user=YOUR_DB_USER
 DB__password=YOUR_SECURE_PASSWORD
 
-# Overlay API (optional; defaults are 0.0.0.0 and 5001)
 API__host=0.0.0.0
 API__port=5001
 # Optional: require Bearer or X-API-Key for GET/PUT /payment-link
 # API__payment_link_api_key=your-secret-key
 
-# Optional: Stripe webhook secret for POST /stripe-webhook (payment-to-donor sync)
+# Optional: Stripe webhook secret for POST /stripe-webhook
 # STRIPE__webhook_secret=whsec_...
 ```
 
-- **`DB__host=cloud-sql-auth`** is the Docker Compose service name of the Cloud SQL Proxy; the worker and overlay API connect to it on port 5432.
+- **`DB__host=cloud-sql-auth`** is the Docker Compose service name of the Cloud SQL Proxy.
 
-If you run the stack **on the GCP VM** and use the Cloud SQL **private IP** instead of the proxy, set:
-
-```bash
-DB__host=<Cloud SQL private IP>
-DB__port=5432
-DB__name=donate
-DB__user=...
-DB__password=...
-```
-
-and do **not** start the `cloud-sql-auth` service (or use a separate compose override).
+If you run on the **GCP VM** and use the Cloud SQL **private IP**, set `DB__host=<Cloud SQL private IP>` and do not start the `cloud-sql-auth` service (or use a separate compose override).
 
 ### Full list of optional env vars
 
@@ -366,7 +388,7 @@ Create the schema (tables for donors, ranking, PIX alerts, overlay_payment_link)
 1. Start only the Cloud SQL Proxy (e.g. in `docker/` with the same `.env`):
 
    ```bash
-   docker compose up -d cloud-sql-auth
+   docker compose --profile db up -d cloud-sql-auth
    ```
 
 2. From the repo root, with `DB__*` set (e.g. in a `.env` in the repo root or exported), run:
@@ -375,18 +397,11 @@ Create the schema (tables for donors, ranking, PIX alerts, overlay_payment_link)
    uv run python scripts/init_db.py
    ```
 
-   If `DB__user` is empty, the app uses SQLite (`overlay.db`) and no proxy is needed.
+   Or use the Taskfile: `task app:init-db`. If `DB__user` is empty, the app uses SQLite (`overlay.db`) and no proxy is needed.
 
 **Option B – On the VM**
 
-1. Copy your `.env` (with `DB__*` and, if using proxy, `CLOUD_SQL_CONNECTION_NAME`) to the VM.
-2. Run the proxy (if used) and then:
-
-   ```bash
-   uv run python scripts/init_db.py
-   ```
-
-   Or run `init_db.py` inside a worker container that shares the same network as the proxy.
+Copy your `.env` to the VM, run the proxy if used, then `uv run python scripts/init_db.py` (or run it inside a worker container that shares the same network as the proxy).
 
 ---
 
@@ -396,53 +411,51 @@ From the **`docker/`** directory (with the same `.env` that has `CLOUD_SQL_CONNE
 
 ```bash
 cd docker
-docker compose up -d
+docker compose --profile db up -d   # include cloud-sql-auth if you use the proxy
+docker compose up -d                 # nginx-rtmp, overlay-api, worker
 ```
 
 This starts:
 
 - **nginx-rtmp** – RTMP ingest on port **1935** (application `live`); application `out` for worker RTMP and YouTube push (see [YouTube Live](#youtube-live-multiple-accounts)).
 - **overlay-api** – Overlay data API (donors, alerts, ranking, payment link, Stripe webhook, YouTube OAuth and push-config refresh) on port **5001**.
-- **worker** – Python stream worker (demux, overlay, encode); reads overlay data from the DB; optional RTMP output to Nginx when `WORKER__RTMP_OUTPUT_URL` is set.
-- **cloud-sql-auth** – Cloud SQL Auth Proxy; worker and overlay API use it when `DB__host=cloud-sql-auth`.
+- **worker** – Python stream worker (`main.py`); reads overlay data from the DB; optional RTMP output to Nginx when `WORKER__RTMP_OUTPUT_URL` is set.
+- **cloud-sql-auth** – Cloud SQL Auth Proxy (when using `--profile db`); worker and overlay API use it when `DB__host=cloud-sql-auth`.
 
-**Note:** The Compose file uses the image `tiangolo/nginx-rtmp` for Nginx-RTMP (no custom build by default).
+The worker container uses `Dockerfile.worker`; the overlay-api service uses the same image with entrypoint `python -m overlay_api.app`. Nginx config and `conf.d` are mounted so the overlay API can write `youtube_push.conf` and Nginx can include it.
 
-To run **on the GCP VM**:
-
-1. Install Docker and Docker Compose on the VM (e.g. via startup script or manually).
-2. Clone the repo and copy `docker/.env` (and optionally adjust `DB__host` to the Cloud SQL private IP and omit the proxy).
-3. Run `docker compose up -d` from `docker/`.
+To run **on the GCP VM**: install Docker and Docker Compose, clone the repo, copy `docker/.env` (and optionally set `DB__host` to the Cloud SQL private IP and omit the proxy), then run `docker compose up -d` from `docker/`.
 
 ---
 
 ## Ingest stream and push to YouTube Live
 
-- **Worker input:** The worker reads from a file or RTSP URL (`WORKER__default_input_url`). For OBS or another encoder, you can point the worker at an RTMP URL if supported, or use an intermediate RTSP/RTMP server that the worker pulls from.
+- **Worker input:** The worker reads from a file or RTSP URL (`WORKER__default_input_url`). For OBS or another encoder, you can ingest to Nginx `live`; the worker can be pointed at a different source (e.g. file loop or RTSP) and publish its encoded output to Nginx `out`.
 
 - **YouTube Live (recommended – multiple accounts):** Use the [YouTube Live (multiple accounts)](#youtube-live-multiple-accounts) flow: set `WORKER__RTMP_OUTPUT_URL`, configure YouTube OAuth and refresh tokens, and let the overlay API write Nginx push URLs from the YouTube API. Nginx application `out` receives the worker stream and pushes to all configured channels.
 
-- **YouTube Live (single channel, manual):** To push only the `live` ingest (e.g. from OBS) to one YouTube stream key, add a `push rtmp://a.rtmp.youtube.com/live2/<stream_key>;` inside the `live` application in `docker/nginx/nginx.conf` and restart Nginx. Ingest is at `rtmp://<host>:1935/live/<stream_key>`; `<host>` is the VM’s public IP or your host when running Compose locally.
+- **YouTube Live (single channel, manual):** To push only the `live` ingest to one YouTube stream key, add a `push rtmp://a.rtmp.youtube.com/live2/<stream_key>;` inside the `live` application in `docker/nginx/nginx.conf` and restart Nginx.
 
 ---
 
 ## Overlay API and data
 
-- **Read:** Workers read the Top 10 ranking, PIX alerts, and the global payment link from the database (atomic snapshot) every few seconds; if the DB is unreachable, they keep the last known overlay.
+- **Read:** Workers call `get_overlay_snapshot()` (in `stream_workers.db`) every `WORKER__overlay_refresh_interval_seconds`; they get ranking, active PIX alerts, and the payment link in one transaction. If the DB is unreachable, they keep the last known overlay.
 - **Write:** The **overlay API** writes donors, alerts, ranking, and the payment link to the same database. It is included in Docker Compose (service `overlay-api`). For local runs:
 
   ```bash
   uv run overlay-api
   ```
 
-  Default bind: `0.0.0.0:5001`. Set `API__host` and `API__port` via env if needed.
+  Or `task app:api` (binds to port 5099 to avoid conflict with other services). Default bind is `0.0.0.0:5001`; set `API__host` and `API__port` via env if needed.
 
-- **Endpoints:**  
-  - `POST /donors`, `POST /alerts`, `POST /ranking` – feed overlay data from your donation/alert backend (see `src/overlay_api/app.py`).  
-  - **GET/PUT `/payment-link`** – read/update the single global payment link (URL + label) shown on the overlay. When `API__payment_link_api_key` is set, requests must send `Authorization: Bearer <key>` or `X-API-Key: <key>`.  
+- **Endpoints:**
+  - `POST /donors`, `POST /alerts`, `POST /ranking` – feed overlay data from your donation/alert backend.
+  - **GET/PUT `/payment-link`** – read/update the single global payment link (URL + label) shown on the overlay. When `API__payment_link_api_key` is set, requests must send `Authorization: Bearer <key>` or `X-API-Key: <key>`.
   - **POST `/stripe-webhook`** – Stripe webhook for payment-to-donor sync. When `STRIPE__webhook_secret` is set, the API verifies the signature and creates donors on `checkout.session.completed`.
+  - **GET `/youtube/connect`**, **GET `/youtube/callback`** – OAuth flow to add YouTube channel refresh tokens to `YOUTUBE__REFRESH_TOKENS`.
 
-- **Payment link on overlay:** One global payment/donation link (URL + label) is stored in `overlay_payment_link` and drawn on the overlay when set; when empty, no payment link area is shown. For setup (Stripe payment links, webhook, API key), see **`specs/1-stripe-payment-links/quickstart.md`**.
+- **Payment link on overlay:** One global payment/donation link (URL + label) is stored in `overlay_payment_link` and drawn on the overlay when set; when empty, no payment link area is shown.
 
 ---
 
@@ -452,9 +465,9 @@ The same overlay-encoded stream can be pushed to **multiple YouTube channels**. 
 
 1. **Terraform:** The IAM module enables the YouTube Data API (`youtube.googleapis.com`) in the project. Apply Terraform as usual.
 2. **OAuth client (one-time):** In GCP Console → APIs & Services → Credentials, create an OAuth 2.0 client ID (e.g. Web application). Set `YOUTUBE__CLIENT_ID` and `YOUTUBE__CLIENT_SECRET` in your `.env`.
-3. **Connect each channel (one-time per channel):** Open `GET /youtube/connect` (e.g. `http://<api-host>:5001/youtube/connect`). Optionally protect with `API__payment_link_api_key`. After signing in with the YouTube channel’s Google account, the callback page shows a **refresh token**. Add it to `YOUTUBE__REFRESH_TOKENS` in `.env` as JSON, e.g. `YOUTUBE__REFRESH_TOKENS={"UCxxxx":"1//0abc..."}`. Merge with existing channels if needed. Restart the overlay API.
+3. **Connect each channel (one-time per channel):** Open `GET /youtube/connect` (e.g. `http://<api-host>:5001/youtube/connect`). After signing in with the YouTube channel’s Google account, the callback page shows a **refresh token**. Add it to `YOUTUBE__REFRESH_TOKENS` in `.env` as JSON, e.g. `YOUTUBE__REFRESH_TOKENS={"UCxxxx":"1//0abc..."}`. Restart the overlay API.
 4. **Worker RTMP output:** Set `WORKER__RTMP_OUTPUT_URL=rtmp://nginx-rtmp:1935/out/stream` (or your Nginx host/port) so the worker publishes the encoded stream to the Nginx `out` application.
-5. **Overlay API** runs a background loop that refreshes access tokens, calls the YouTube Live Streaming API to create or reuse streams and broadcasts, writes `push rtmp://...;` lines to the Nginx include file, and reloads Nginx. No manual nginx or stream key edits.
+5. The **overlay API** runs a background loop that refreshes access tokens, calls the YouTube Live Streaming API to create or reuse streams and broadcasts, writes `push rtmp://...;` lines to the Nginx include file, and reloads Nginx.
 
 With Docker Compose, the overlay-api service mounts the same `nginx/conf.d` volume as Nginx so it can write the push file. Ensure `YOUTUBE__PUSH_CONF_PATH` matches the path inside the container (default `/etc/nginx/conf.d/youtube_push.conf`).
 
@@ -475,8 +488,8 @@ See the [How it works (diagrams)](#how-it-works-diagrams) section for Mermaid di
 |-----------------|---------|
 | **Terraform**   | VPC, firewall (1935, 554), Cloud SQL (PostgreSQL, private IP), Compute Engine VM, IAM; IAM module enables YouTube Data API. |
 | **Nginx-RTMP**  | Application `live`: RTMP ingest on 1935. Application `out`: worker RTMP input and push to YouTube (push config from overlay API). |
-| **Worker**      | Demux → overlay (DB) → PTS/DTS → H.264 encode; optional RTMP publish to Nginx `out` when `WORKER__RTMP_OUTPUT_URL` is set. |
-| **Cloud SQL**   | Stores donors, ranking, PIX alerts, overlay_payment_link; read by workers, written by overlay API. |
+| **Worker**      | `main.py`: demux → overlay (DB) → PTS/DTS → H.264 encode; optional RTMP publish via FFmpeg to Nginx `out` when `WORKER__RTMP_OUTPUT_URL` is set. |
+| **Cloud SQL**   | Stores donors, ranking, PIX alerts, overlay_payment_link; read by workers via `get_overlay_snapshot()`, written by overlay API. |
 | **Auth Proxy**  | Allows secure connection to Cloud SQL from Docker or local (no direct public IP on DB). |
 
 ---
@@ -488,15 +501,4 @@ See the [How it works (diagrams)](#how-it-works-diagrams) section for Mermaid di
 - **VM has no external IP:** The Compute instance includes `access_config {}`, so it gets an ephemeral external IP. If you use a different Terraform setup without it, you won’t be able to reach RTMP from the internet unless you use a load balancer or another path.
 - **Firewall:** Only ports 1935 and 554 are open for ingress; overlay API (5001) and SSH (22) are not in the Terraform firewall. Add rules or use IAP if you need to reach the VM for SSH or the API.
 - **YouTube push not updating:** Ensure overlay-api has write access to the same `nginx/conf.d` path as Nginx (volume mount in Compose) and that `YOUTUBE__PUSH_CONF_PATH` matches. Check that `YOUTUBE__REFRESH_TOKENS` is valid JSON and that the overlay API log shows the YouTube refresh thread started.
-- **Worker not pushing to RTMP:** Ensure `WORKER__RTMP_OUTPUT_URL` is set (e.g. `rtmp://nginx-rtmp:1935/out/stream`) and that the worker container can reach the Nginx host; ensure ffmpeg is installed in the worker image.
-
----
-
-## Repo layout
-
-- **`terraform/`** – GCP modules (network, compute, cloud-sql, iam with YouTube API) and prod environment.
-- **`docker/`** – Docker Compose (nginx-rtmp, overlay-api, worker, cloud-sql-auth), Nginx config and `conf.d` for YouTube push, Dockerfile for worker.
-- **`src/stream_workers/`** – Demux, overlay, PTS/DTS, encode, RTMP output, DB read.
-- **`src/overlay_api/`** – Internal API for overlay data writes, YouTube OAuth and push refresh.
-- **`src/config/`** – Centralized Pydantic Settings (DB, encoding, API, worker).
-- **`scripts/init_db.py`** – Creates the database schema.
+- **Worker not pushing to RTMP:** Ensure `WORKER__RTMP_OUTPUT_URL` is set (e.g. `rtmp://nginx-rtmp:1935/out/stream`) and that the worker container can reach the Nginx host. The worker uses FFmpeg (installed in the Docker image) to publish; ensure the FFmpeg process is starting (check logs for "ffmpeg not found" or "FFmpeg start failed").
