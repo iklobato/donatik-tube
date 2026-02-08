@@ -38,8 +38,8 @@ def _overlay_refresh_loop() -> None:
     while True:
         time.sleep(get_settings().worker.overlay_refresh_interval_seconds)
         try:
-            ranking, alerts = db_module.get_overlay_snapshot()
-            overlay.set_overlay_data(ranking, alerts)
+            ranking, alerts, payment_link = db_module.get_overlay_snapshot()
+            overlay.set_overlay_data(ranking, alerts, payment_link)
         except Exception as e:
             logger.debug("Overlay DB unreachable, keeping last known: %s", e)
 

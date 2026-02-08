@@ -52,6 +52,16 @@ class PIXAlert(Base):
     created_at: Mapped[datetime] = mapped_column(default=lambda: datetime.now(UTC))
 
 
+class OverlayPaymentLink(Base):
+    """Single global payment link for overlay (one row, id=1)."""
+
+    __tablename__ = "overlay_payment_link"
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    url: Mapped[str | None] = mapped_column(nullable=True)
+    label: Mapped[str | None] = mapped_column(nullable=True)
+    active: Mapped[bool] = mapped_column(nullable=False, default=False)
+
+
 _engine_holder: list[Engine | None] = [None]
 
 
@@ -66,9 +76,12 @@ def get_engine() -> Engine:
     return eng
 
 
-def get_overlay_snapshot() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def get_overlay_snapshot() -> tuple[
+    list[dict[str, Any]], list[dict[str, Any]], dict[str, Any] | None
+]:
     """
-    Return (ranking, active_pix_alerts) in one transaction. Atomic snapshot per overlay-state contract.
+    Return (ranking, active_pix_alerts, payment_link) in one transaction.
+    payment_link is {"url": str, "label": str} when overlay_payment_link has url and active true, else None.
     Raises on DB error; caller keeps last known overlay data when unreachable.
     """
     engine = get_engine()
@@ -89,4 +102,15 @@ def get_overlay_snapshot() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
             {"now": now},
         ).fetchall():
             alerts.append({"id": row[0], "message": row[1]})
-        return (ranking, alerts)
+        link_row = session.get(OverlayPaymentLink, 1)
+        payment_link: dict[str, Any] | None = None
+        if (
+            link_row is not None
+            and link_row.url
+            and link_row.active
+        ):
+            payment_link = {
+                "url": link_row.url,
+                "label": link_row.label or "",
+            }
+        return (ranking, alerts, payment_link)
