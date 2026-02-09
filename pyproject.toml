@@ -29,6 +29,7 @@ overlay-api = "overlay_api.app:run"
 dev = [
     "pytest>=7.0.0",
     "black>=24.0.0",
+    "pyright>=1.1.0",
     "ruff>=0.8.0",
     "mypy>=1.13.0",
 ]
@@ -75,4 +76,14 @@ show_error_codes = true
 module = "av"
 ignore_missing_imports = true
 follow_imports = "skip"
+
+[tool.pyright]
+pythonVersion = "3.11"
+typeCheckingMode = "strict"
+include = ["src", "scripts"]
+reportArgumentType = true
+reportUnknownMemberType = "none"
+reportUnknownVariableType = "none"
+reportUnknownArgumentType = "none"
+reportAttributeAccessIssue = "none"
 
